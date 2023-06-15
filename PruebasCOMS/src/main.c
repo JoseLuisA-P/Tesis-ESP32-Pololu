@@ -162,17 +162,17 @@ void nvs_init(void)
 static void do_retransmit(const int sock)
 {
     int len;
-    char rx_buffer[128];
+    char rx_buffer[1024];
 
     do {
-        len = recv(sock, rx_buffer, sizeof(rx_buffer) - 1, 0);
+        len = recv(sock, rx_buffer, sizeof(rx_buffer), 0);
         if (len < 0) {
             ESP_LOGE(TAG, "Error occurred during receiving: errno %d", errno);
         } else if (len == 0) {
             ESP_LOGW(TAG, "Connection closed");
         } else {
             rx_buffer[len] = 0; // Null-terminate whatever is received and treat it like a string
-            ESP_LOGI(TAG, "Received %d bytes: %s", len, rx_buffer);
+            ESP_LOGI(TAG, "Received %d bytes", len);
 
             // send() can return less bytes than supplied length.
             // Walk-around for robust implementation. 
