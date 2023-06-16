@@ -34,6 +34,8 @@ static const int uart_buffer_size = 1024*5;
 #define uart_num            UART_NUM_2
 int num = 0;
 char data[1024*5+1];
+char confMess = 'B';
+char negMess = 'A';
 uint8_t avail = 0;
 
 //Parametros para la configuracion del servidor
@@ -44,6 +46,8 @@ uint8_t avail = 0;
 
 //Puerto para la comunicacion
 #define PORT 3333
+int sock;
+uint8_t tcpavail = 0;
 
 //TAG para el log de errores o informacion
 static const char *TAG = "Prueba";
@@ -51,7 +55,7 @@ static const char *TAG = "Prueba";
 void uart_init_config(void)
 {   
     const uart_config_t uart_config = {
-        .baud_rate = 921600,
+        .baud_rate = 921600*2,
         .data_bits = UART_DATA_8_BITS,
         .parity = UART_PARITY_DISABLE,
         .stop_bits = UART_STOP_BITS_1,
@@ -59,7 +63,7 @@ void uart_init_config(void)
         .source_clk = UART_SCLK_APB,
     };
     // Install UART driver using an event queue here
-    ESP_ERROR_CHECK(uart_driver_install(uart_num, uart_buffer_size, uart_buffer_size, 0, NULL, 0));
+    ESP_ERROR_CHECK(uart_driver_install(uart_num, uart_buffer_size, 0, 0, NULL, 0));
     // Configure UART parameters
     ESP_ERROR_CHECK(uart_param_config(uart_num, &uart_config)); 
     // Set UART pins(TX: IO17, RX: IO16, NOT USED, NOT USED)
@@ -73,8 +77,8 @@ static void tx_task(void *arg)
     while (1) {	
 
         if(avail > 0){
-            uart_write_bytes(uart_num, &data, uart_buffer_size);
-            //printf("Enviado\n");
+            //uart_write_bytes(uart_num, &data, uart_buffer_size);
+            printf("Enviado\n");
             avail = 0;
         }
         vTaskDelay(10/ portTICK_PERIOD_MS);
@@ -88,7 +92,8 @@ static void rx_task(void *arg)
         const int tam = uart_read_bytes(uart_num,data,uart_buffer_size, 100/ portTICK_PERIOD_MS);
         if (tam > 0) {
             printf ("Recibido\n");
-            avail = 1;
+            //avail = 1;
+            tcpavail = 1;
         }
     }
     
@@ -159,10 +164,34 @@ void nvs_init(void)
     ESP_ERROR_CHECK(ret);  
 }
 
+static void TCPSendRobust(void *arg)
+{
+    while(1)
+    {
+        if(tcpavail>0)
+        {
+            printf ("TCPEnviado\n");
+            int to_write = 4800;
+            while (to_write > 0) {
+                int written = send(sock, &data, to_write, 0);
+                if (written < 0) {
+                    ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
+                    uart_write_bytes(uart_num, &negMess, 1);
+                    tcpavail = 0;
+                }
+                to_write -= written;
+            }
+            
+            tcpavail = 0;
+        }
+        vTaskDelay(10/ portTICK_PERIOD_MS);
+    }
+}
+
 static void do_retransmit(const int sock)
 {
     int len;
-    char rx_buffer[1024];
+    char rx_buffer[1];
 
     do {
         len = recv(sock, rx_buffer, sizeof(rx_buffer), 0);
@@ -171,19 +200,20 @@ static void do_retransmit(const int sock)
         } else if (len == 0) {
             ESP_LOGW(TAG, "Connection closed");
         } else {
-            rx_buffer[len] = 0; // Null-terminate whatever is received and treat it like a string
             ESP_LOGI(TAG, "Received %d bytes", len);
-
+            uart_write_bytes(uart_num, &confMess, 1);
             // send() can return less bytes than supplied length.
             // Walk-around for robust implementation. 
-            int to_write = len;
+            /*
+            int to_write = 4800;
             while (to_write > 0) {
-                int written = send(sock, rx_buffer + (len - to_write), to_write, 0);
+                int written = send(sock, &data, to_write, 0);
                 if (written < 0) {
                     ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
                 }
                 to_write -= written;
-            }
+            }*/
+            
         }
     } while (len > 0);
 }
@@ -234,7 +264,7 @@ static void tcp_server_init(void *arg)
         struct sockaddr_in6 source_addr;
         uint addr_len = sizeof(source_addr);
 
-        int sock = accept(listen_sock, (struct sockaddr *)&source_addr, &addr_len);
+        sock = accept(listen_sock, (struct sockaddr *)&source_addr, &addr_len);
 
         if (sock < 0) {
             ESP_LOGE(TAG, "Unable to accept connection: errno %d", errno);
@@ -245,9 +275,9 @@ static void tcp_server_init(void *arg)
         ESP_LOGI(TAG, "Socket accepted ip address: %s", addr_str);   
         
         do_retransmit(sock);
-        
-        shutdown(sock, 0);
-        close(sock);
+
+        //shutdown(sock, 0);
+        //close(sock);
 
     }
 
@@ -262,13 +292,12 @@ void app_main(void)
     //Inicializando el UART
     uart_init_config();
     //Inicializando el NVS
-    ESP_ERROR_CHECK(nvs_flash_init());
+    //ESP_ERROR_CHECK(nvs_flash_init());
+    nvs_init();
     //Inicializando el WIFI
     wifi_init_softap();
-    //tcp_server_init(NULL);
 
     xTaskCreate(rx_task, "uart_rx_task", 1024, NULL, 2, NULL);
-    xTaskCreate(tx_task, "uart_tx_task", 1024, NULL, 1, NULL);
-    //Creando el socket TCP para el envio de datos
     xTaskCreate(tcp_server_init,"TCPSocket",1024*4,NULL,3,NULL);
+    xTaskCreate(TCPSendRobust,"Envio_datos_TCP",1024*4,NULL,4,NULL);
 }
