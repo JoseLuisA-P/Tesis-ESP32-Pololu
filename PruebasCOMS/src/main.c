@@ -65,6 +65,13 @@ uint8_t tcpavail = 0;
 #define SERVO3_CHANNEL          LEDC_CHANNEL_2
 #define SERVO3_PIN              GPIO_NUM_3
 
+//Parametros para calcular el duty en base al angulo
+const float minDeg = 0.0;
+const float maxDeg = 180.0;
+const float minDuty = 204.0;
+const float maxDuty = 1024.0;
+float dutyValue = 0;
+
 //TAG para el log de errores o informacion
 static const char *TAG = "Prueba";
 
@@ -331,7 +338,7 @@ static void servo_ledc_config(void)
         servo_channel[i].speed_mode =   LEDC_MODE;
         servo_channel[i].timer_sel =    LEDC_TIMER;
         servo_channel[i].intr_type =    LEDC_INTR_DISABLE;
-        servo_channel[i].duty =         0;
+        servo_channel[i].duty =         615; //5% de duty o posicion 0 grados del servo
         servo_channel[i].hpoint =       0;
 
         ESP_ERROR_CHECK(ledc_channel_config(&servo_channel[i]));
@@ -341,36 +348,10 @@ static void servo_ledc_config(void)
 
 static void SetAngle(int channel, int angle)
 {
-    ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, channel, angle));
+    dutyValue = minDuty + ((maxDuty-minDuty)/(maxDeg-minDeg))*(angle-minDeg);
+    ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, channel, dutyValue));
     ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, channel));
 }
-
-/*
-static void example_ledc_init(void)
-{
-    // Prepare and then apply the LEDC PWM timer configuration
-    ledc_timer_config_t ledc_timer = {
-        .speed_mode       = LEDC_MODE,
-        .timer_num        = LEDC_TIMER,
-        .duty_resolution  = LEDC_DUTY_RES,
-        .freq_hz          = LEDC_FREQUENCY,
-        .clk_cfg          = LEDC_AUTO_CLK
-    };
-    ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer));
-
-    // Prepare and then apply the LEDC PWM channel configuration
-    ledc_channel_config_t ledc_channel = {
-        .speed_mode     = LEDC_MODE,
-        .channel        = LEDC_CHANNEL,
-        .timer_sel      = LEDC_TIMER,
-        .intr_type      = LEDC_INTR_DISABLE,
-        .gpio_num       = LEDC_OUTPUT_IO,
-        .duty           = 0, // Set duty to 0%
-        .hpoint         = 0
-    };
-    ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel));
-}
-*/
 
 void app_main(void)
 {   
@@ -386,16 +367,11 @@ void app_main(void)
      // Set the LEDC peripheral configuration
     servo_ledc_config();
     vTaskDelay(pdMS_TO_TICKS(2000));
-    SetAngle(SERVO1_CHANNEL,4095);
-
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    SetAngle(SERVO2_CHANNEL,4095);
     SetAngle(SERVO1_CHANNEL,0);
-
     vTaskDelay(pdMS_TO_TICKS(2000));
-    SetAngle(SERVO3_CHANNEL,4095);
-    SetAngle(SERVO2_CHANNEL,0);
-
+    SetAngle(SERVO1_CHANNEL,90);
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    SetAngle(SERVO1_CHANNEL,180);
 
     xTaskCreate(rx_task, "uart_rx_task", 1024, NULL, 2, NULL);
     xTaskCreate(tcp_server_init,"TCPSocket",1024*4,NULL,3,NULL);
