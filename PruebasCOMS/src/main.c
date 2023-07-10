@@ -93,7 +93,7 @@ static void rx_task(void *arg)
         if (tam > 0) {
             printf ("Recibido\n");
             //avail = 1;
-            tcpavail = 1;
+            //tcpavail = 1;
         }
     }
     
@@ -202,6 +202,7 @@ static void do_retransmit(const int sock)
         } else {
             ESP_LOGI(TAG, "Received %d bytes", len);
             uart_write_bytes(uart_num, &confMess, 1);
+            tcpavail = 1;
             // send() can return less bytes than supplied length.
             // Walk-around for robust implementation. 
             /*
@@ -289,10 +290,11 @@ static void tcp_server_init(void *arg)
 
 void app_main(void)
 {   
+
+    
     //Inicializando el UART
     uart_init_config();
     //Inicializando el NVS
-    //ESP_ERROR_CHECK(nvs_flash_init());
     nvs_init();
     //Inicializando el WIFI
     wifi_init_softap();
