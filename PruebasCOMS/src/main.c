@@ -52,14 +52,18 @@ uint8_t avail = 0;
 int sock;
 uint8_t tcpavail = 0;
 
-//Parametros para configurar los LEDC (Servo)
+//Parametros para configurar el timer del LEDC
 #define LEDC_TIMER              LEDC_TIMER_0
 #define LEDC_MODE               LEDC_LOW_SPEED_MODE
-#define LEDC_OUTPUT_IO          GPIO_NUM_3 // Define the output GPIO
-#define LEDC_CHANNEL            LEDC_CHANNEL_0
-#define LEDC_DUTY_RES           LEDC_TIMER_13_BIT // Set duty resolution to 13 bits
-#define LEDC_DUTY               (4095) // Set duty to 50%. ((2 ** 13) - 1) * 50% = 4095
-#define LEDC_FREQUENCY          (50) // Frequency in Hertz. Set frequency at 5 kHz
+#define LEDC_DUTY_RES           LEDC_TIMER_13_BIT // Resolucion del ciclo de trabajo de 13 bits
+
+//Parametros para configurar el canal y pin del servo con el LEDC
+#define SERVO1_CHANNEL          LEDC_CHANNEL_0
+#define SERVO1_PIN              GPIO_NUM_1
+#define SERVO2_CHANNEL          LEDC_CHANNEL_1
+#define SERVO2_PIN              GPIO_NUM_2
+#define SERVO3_CHANNEL          LEDC_CHANNEL_2
+#define SERVO3_PIN              GPIO_NUM_3
 
 //TAG para el log de errores o informacion
 static const char *TAG = "Prueba";
@@ -300,6 +304,48 @@ static void tcp_server_init(void *arg)
 
 }
 
+static void servo_ledc_config(void)
+{
+    ledc_timer_config_t ledc_timer = {
+        .speed_mode       = LEDC_MODE,
+        .timer_num        = LEDC_TIMER,
+        .duty_resolution  = LEDC_DUTY_RES,
+        .freq_hz          = 50, // (1/20 mS) O 50 Hz
+        .clk_cfg          = LEDC_AUTO_CLK
+    };
+    ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer));
+
+    ledc_channel_config_t servo_channel[3];
+    //Configuracion del canal y pin del servo 1
+    servo_channel[0].channel = SERVO1_CHANNEL;
+    servo_channel[0].gpio_num = SERVO1_PIN;
+    //Configuracion del canal y pin del servo 2
+    servo_channel[1].channel = SERVO2_CHANNEL;
+    servo_channel[1].gpio_num = SERVO2_PIN;
+    //Configuracion del canal y pin del servo 3
+    servo_channel[2].channel = SERVO3_CHANNEL;
+    servo_channel[2].gpio_num = SERVO3_PIN;
+    //Configuracion de los parametros generales entre canales
+    for (size_t i = 0; i < 3; i++)
+    {
+        servo_channel[i].speed_mode =   LEDC_MODE;
+        servo_channel[i].timer_sel =    LEDC_TIMER;
+        servo_channel[i].intr_type =    LEDC_INTR_DISABLE;
+        servo_channel[i].duty =         0;
+        servo_channel[i].hpoint =       0;
+
+        ESP_ERROR_CHECK(ledc_channel_config(&servo_channel[i]));
+    }
+
+}
+
+static void SetAngle(int channel, int angle)
+{
+    ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, channel, angle));
+    ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, channel));
+}
+
+/*
 static void example_ledc_init(void)
 {
     // Prepare and then apply the LEDC PWM timer configuration
@@ -307,7 +353,7 @@ static void example_ledc_init(void)
         .speed_mode       = LEDC_MODE,
         .timer_num        = LEDC_TIMER,
         .duty_resolution  = LEDC_DUTY_RES,
-        .freq_hz          = LEDC_FREQUENCY,  // Set output frequency at 5 kHz
+        .freq_hz          = LEDC_FREQUENCY,
         .clk_cfg          = LEDC_AUTO_CLK
     };
     ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer));
@@ -324,6 +370,7 @@ static void example_ledc_init(void)
     };
     ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel));
 }
+*/
 
 void app_main(void)
 {   
@@ -337,11 +384,18 @@ void app_main(void)
     wifi_init_softap();
 
      // Set the LEDC peripheral configuration
-    example_ledc_init();
-    // Set duty to 50%
-    ESP_ERROR_CHECK(ledc_set_duty(LEDC_MODE, LEDC_CHANNEL, LEDC_DUTY));
-    // Update duty to apply the new value
-    ESP_ERROR_CHECK(ledc_update_duty(LEDC_MODE, LEDC_CHANNEL));
+    servo_ledc_config();
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    SetAngle(SERVO1_CHANNEL,4095);
+
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    SetAngle(SERVO2_CHANNEL,4095);
+    SetAngle(SERVO1_CHANNEL,0);
+
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    SetAngle(SERVO3_CHANNEL,4095);
+    SetAngle(SERVO2_CHANNEL,0);
+
 
     xTaskCreate(rx_task, "uart_rx_task", 1024, NULL, 2, NULL);
     xTaskCreate(tcp_server_init,"TCPSocket",1024*4,NULL,3,NULL);
