@@ -28,7 +28,7 @@
 #include "driver/ledc.h"
 
 // Setup UART buffered IO with event queue
-static const int uart_buffer_size = 1024*5;
+static const int uart_buffer_size = 4800;
 
 // Puertos y conexiones a utilizar
 //TX y RX asignados libremente
@@ -36,10 +36,12 @@ static const int uart_buffer_size = 1024*5;
 #define RXD_PIN             (GPIO_NUM_5) 
 #define uart_num            UART_NUM_2
 int num = 0;
-char data[1024*5+1];
+//char data[4800+1];
+uint8_t data[4800];
 char confMess = 'B';
 char negMess = 'A';
 uint8_t avail = 0;
+int tam = 0;
 
 //Parametros para la configuracion del servidor
 #define SSID                "ESP32-AP"
@@ -100,8 +102,8 @@ static void tx_task(void *arg)
     while (1) {	
 
         if(avail > 0){
-            //uart_write_bytes(uart_num, &data, uart_buffer_size);
-            printf("Enviado\n");
+            uart_write_bytes(uart_num,(const char*)&data, tam);
+            //printf("Enviado\n");
             avail = 0;
         }
         vTaskDelay(10/ portTICK_PERIOD_MS);
@@ -112,12 +114,14 @@ static void rx_task(void *arg)
 {
     while(1)
     {
-        const int tam = uart_read_bytes(uart_num,data,uart_buffer_size, 100/ portTICK_PERIOD_MS);
+        uart_get_buffered_data_len(uart_num, (size_t*)&tam);
+        tam = uart_read_bytes(uart_num,data,tam, 100/ portTICK_PERIOD_MS);
         if (tam > 0) {
-            printf ("Recibido\n");
-            //avail = 1;
+            //printf ("Recibido\n");
+            avail = 1;
             //tcpavail = 1;
         }
+        vTaskDelay(10/ portTICK_PERIOD_MS);
     }
     
 }
@@ -355,8 +359,7 @@ static void SetAngle(int channel, int angle)
 
 void app_main(void)
 {   
-
-    
+    /*
     //Inicializando el UART
     uart_init_config();
     //Inicializando el NVS
@@ -364,7 +367,7 @@ void app_main(void)
     //Inicializando el WIFI
     wifi_init_softap();
 
-     // Set the LEDC peripheral configuration
+     //Actualizacion del valor del PWM (angulo del servo)
     servo_ledc_config();
     vTaskDelay(pdMS_TO_TICKS(2000));
     SetAngle(SERVO1_CHANNEL,0);
@@ -376,4 +379,17 @@ void app_main(void)
     xTaskCreate(rx_task, "uart_rx_task", 1024, NULL, 2, NULL);
     xTaskCreate(tcp_server_init,"TCPSocket",1024*4,NULL,3,NULL);
     xTaskCreate(TCPSendRobust,"Envio_datos_TCP",1024*4,NULL,4,NULL);
+    */
+
+    //Inicializando el UART
+    uart_init_config();
+    //Inicializando el NVS
+    nvs_init();
+    //Inicializando el WIFI
+    wifi_init_softap();
+
+    xTaskCreate(rx_task, "uart_rx_task", 1024, NULL, configMAX_PRIORITIES, NULL);
+    xTaskCreate(tx_task, "uart_tx_task", 1024, NULL, configMAX_PRIORITIES - 1, NULL);
+    xTaskCreate(tcp_server_init,"TCPSocket",1024*4,NULL,3,NULL);
+
 }
