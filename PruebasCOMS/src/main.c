@@ -26,6 +26,8 @@
 #include <string.h>
 //Manejo de los LEDC
 #include "driver/ledc.h"
+//Relacionado al SPI
+#include "driver/spi_master.h"
 
 // Setup UART buffered IO with event queue
 static const int uart_buffer_size = 4800;
@@ -42,6 +44,7 @@ char confMess = 'B';
 char negMess = 'A';
 uint8_t avail = 0;
 int tam = 0;
+int mesSize = 0;
 
 //Parametros para la configuracion del servidor
 #define SSID                "ESP32-AP"
@@ -74,6 +77,15 @@ const float minDuty = 204.0;
 const float maxDuty = 1024.0;
 float dutyValue = 0;
 
+//Configuracion de pines para el SPI
+#define SPI_NAME    SPI2_HOST
+#define SPI_MISO    GPIO_NUM_37
+#define SPI_MOSI    GPIO_NUM_35
+#define SPI_CLK     GPIO_NUM_36
+#define SPI_CS      GPIO_NUM_34
+
+#define SPI_MAX_TRANSFER_SIZE 2048
+
 //TAG para el log de errores o informacion
 static const char *TAG = "Prueba";
 
@@ -102,8 +114,8 @@ static void tx_task(void *arg)
     while (1) {	
 
         if(avail > 0){
-            uart_write_bytes(uart_num,(const char*)&data, tam);
-            //printf("Enviado\n");
+            uart_write_bytes(uart_num,&data, tam);
+            //uart_wait_tx_done(uart_num,100/portTICK_PERIOD_MS);
             avail = 0;
         }
         vTaskDelay(10/ portTICK_PERIOD_MS);
@@ -115,9 +127,8 @@ static void rx_task(void *arg)
     while(1)
     {
         uart_get_buffered_data_len(uart_num, (size_t*)&tam);
-        tam = uart_read_bytes(uart_num,data,tam, 100/ portTICK_PERIOD_MS);
+        tam = uart_read_bytes(uart_num,data, tam, 100/ portTICK_PERIOD_MS);
         if (tam > 0) {
-            //printf ("Recibido\n");
             avail = 1;
             //tcpavail = 1;
         }
@@ -198,7 +209,7 @@ static void TCPSendRobust(void *arg)
         if(tcpavail>0)
         {
             printf ("TCPEnviado\n");
-            int to_write = 4800;
+            int to_write = tam;
             while (to_write > 0) {
                 int written = send(sock, &data, to_write, 0);
                 if (written < 0) {
@@ -357,6 +368,37 @@ static void SetAngle(int channel, int angle)
     ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, channel));
 }
 
+static void SPI_init_config(void)
+{
+    //Inicializando la configuracion del SPI
+
+    spi_device_handle_t HandleSPI;
+
+    spi_bus_config_t SpiConfig = 
+    {
+        .miso_io_num = SPI_MISO,
+        .mosi_io_num = SPI_MOSI,
+        .sclk_io_num = SPI_CLK,
+        .quadhd_io_num = -1,
+        .quadwp_io_num = -1,
+        .max_transfer_sz = SPI_MAX_TRANSFER_SIZE,
+    };
+
+    ESP_ERROR_CHECK(spi_bus_initialize(SPI_NAME, &SpiConfig, SPI_DMA_CH_AUTO));
+
+    //Agregando la camara como dispositivo SPI
+    spi_device_interface_config_t CamH7 = 
+    {
+        .clock_speed_hz = 10*1000*1000, //10MHz
+        .mode = 0,
+        .spics_io_num = SPI_CS,
+        .queue_size = 1,
+    };
+
+    ESP_ERROR_CHECK(spi_bus_add_device(SPI_NAME, &CamH7,&HandleSPI));
+
+}
+
 void app_main(void)
 {   
     /*
@@ -382,14 +424,6 @@ void app_main(void)
     */
 
     //Inicializando el UART
-    uart_init_config();
-    //Inicializando el NVS
-    nvs_init();
-    //Inicializando el WIFI
-    wifi_init_softap();
-
-    xTaskCreate(rx_task, "uart_rx_task", 1024, NULL, configMAX_PRIORITIES, NULL);
-    xTaskCreate(tx_task, "uart_tx_task", 1024, NULL, configMAX_PRIORITIES - 1, NULL);
-    xTaskCreate(tcp_server_init,"TCPSocket",1024*4,NULL,3,NULL);
+    SPI_init_config();
 
 }
