@@ -27,7 +27,7 @@
 //Manejo de los LEDC
 #include "driver/ledc.h"
 //Relacionado al SPI
-#include "driver/spi_master.h"
+#include "driver/spi_slave.h"
 
 // Setup UART buffered IO with event queue
 static const int uart_buffer_size = 4800;
@@ -83,8 +83,13 @@ float dutyValue = 0;
 #define SPI_MOSI    GPIO_NUM_35
 #define SPI_CLK     GPIO_NUM_36
 #define SPI_CS      GPIO_NUM_34
+#define SPI_HAND    GPIO_NUM_9
 
-#define SPI_MAX_TRANSFER_SIZE 2048
+//Variables para las solicitudes
+#define BUFFER_SIZE 1024
+char rx_buffer[BUFFER_SIZE];
+size_t rx_buffer_length;
+char recvbuf[3];
 
 //TAG para el log de errores o informacion
 static const char *TAG = "Prueba";
@@ -368,12 +373,21 @@ static void SetAngle(int channel, int angle)
     ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, channel));
 }
 
+void my_post_cb(spi_slave_transaction_t *trans) 
+{
+    //Utilizado para activar el pin despues de la transaccion
+    gpio_set_level(SPI_HAND, 0);
+}
+
+void my_pre_cb(spi_slave_transaction_t *trans) 
+{
+    //Utilizado para apagar el pin antes de la transaccion
+    gpio_set_level(SPI_HAND, 1);
+}
+
 static void SPI_init_config(void)
 {
     //Inicializando la configuracion del SPI
-
-    spi_device_handle_t HandleSPI;
-
     spi_bus_config_t SpiConfig = 
     {
         .miso_io_num = SPI_MISO,
@@ -381,22 +395,61 @@ static void SPI_init_config(void)
         .sclk_io_num = SPI_CLK,
         .quadhd_io_num = -1,
         .quadwp_io_num = -1,
-        .max_transfer_sz = SPI_MAX_TRANSFER_SIZE,
+        .max_transfer_sz = 0,
     };
 
-    ESP_ERROR_CHECK(spi_bus_initialize(SPI_NAME, &SpiConfig, SPI_DMA_CH_AUTO));
-
-    //Agregando la camara como dispositivo SPI
-    spi_device_interface_config_t CamH7 = 
+    spi_slave_interface_config_t slavecfg =
     {
-        .clock_speed_hz = 10*1000*1000, //10MHz
         .mode = 0,
         .spics_io_num = SPI_CS,
-        .queue_size = 1,
+        .queue_size = 3,
+        .flags = 0,
+        .post_setup_cb = my_post_cb,
+        .post_trans_cb = my_pre_cb
     };
 
-    ESP_ERROR_CHECK(spi_bus_add_device(SPI_NAME, &CamH7,&HandleSPI));
+    ESP_ERROR_CHECK(spi_slave_initialize(SPI2_HOST,&SpiConfig,&slavecfg,SPI_DMA_CH_AUTO));
 
+    //Configurando el pin del handshake para solicitar envio de datos y recepcion
+    gpio_config_t io_hand_conf={
+        .intr_type=GPIO_INTR_DISABLE,
+        .mode=GPIO_MODE_OUTPUT,
+        .pin_bit_mask=(1<<SPI_HAND)
+    };
+
+    gpio_config(&io_hand_conf);
+    gpio_set_level(SPI_HAND, 1);
+
+}
+
+static void AskForPicture(void)
+{
+    //Enviando solicitud
+    spi_slave_transaction_t SpiTransaction;   //Se crea el objeto de transaccion y sus indicaciones
+    memset(recvbuf,0x30,sizeof(recvbuf));
+    memset(&SpiTransaction,0,sizeof(SpiTransaction)); //Dejar en 0 la transaccion
+
+    SpiTransaction.length = 3*8; //El tamaño es en bits
+    SpiTransaction.rx_buffer = recvbuf;    //Indica cual es el buffer de informacion
+
+    spi_slave_transmit(SPI2_HOST,&SpiTransaction,portMAX_DELAY);
+
+}
+
+static void AskForPicture2(void)
+{
+    spi_slave_transaction_t spi_slave;
+    spi_slave_transaction_t* spi_out = &spi_slave;
+    memset(rx_buffer,0x30,BUFFER_SIZE);
+    memset(&spi_slave,0,sizeof(spi_slave));
+    memset(&spi_out,0,sizeof(spi_out)); 
+
+    spi_slave.length = BUFFER_SIZE*8;
+    spi_slave.rx_buffer = rx_buffer;
+
+    //spi_slave_transmit(SPI2_HOST,&spi_slave, portMAX_DELAY);
+    spi_slave_queue_trans(SPI2_HOST,&spi_slave,portMAX_DELAY);
+    printf("Recibido: %s\n", rx_buffer);
 }
 
 void app_main(void)
@@ -425,5 +478,8 @@ void app_main(void)
 
     //Inicializando el UART
     SPI_init_config();
+    ESP_LOGE(TAG,"Configurado SPI");
+    vTaskDelay(pdMS_TO_TICKS(10000));
+    AskForPicture2();
 
 }
