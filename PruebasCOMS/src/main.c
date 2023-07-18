@@ -47,8 +47,8 @@ int tam = 0;
 int mesSize = 0;
 
 //Parametros para la configuracion del servidor
-#define SSID                "ESP32-AP"
-#define WIFIPASSWORD        "1234567890"
+#define SSID                "Pololu3Pi+"
+#define WIFIPASSWORD        "MT30062023"
 #define WIFICHANNEL         2
 #define MAXCONNECTIONS      5
 
@@ -86,13 +86,15 @@ float dutyValue = 0;
 #define SPI_HAND    GPIO_NUM_9
 
 //Variables para las solicitudes
-#define BUFFER_SIZE 1024
+#define BUFFER_SIZE 2048 //antes 1024
 char rx_buffer[BUFFER_SIZE];
-size_t rx_buffer_length;
 char recvbuf[3];
 
 //TAG para el log de errores o informacion
 static const char *TAG = "Prueba";
+
+//Prototipos para algunas funciones
+static void AskForPicture(void);
 
 void uart_init_config(void)
 {   
@@ -214,12 +216,11 @@ static void TCPSendRobust(void *arg)
         if(tcpavail>0)
         {
             printf ("TCPEnviado\n");
-            int to_write = tam;
+            int to_write = BUFFER_SIZE;
             while (to_write > 0) {
-                int written = send(sock, &data, to_write, 0);
+                int written = send(sock, &rx_buffer, to_write, 0);
                 if (written < 0) {
                     ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
-                    uart_write_bytes(uart_num, &negMess, 1);
                     tcpavail = 0;
                 }
                 to_write -= written;
@@ -244,19 +245,8 @@ static void do_retransmit(const int sock)
             ESP_LOGW(TAG, "Connection closed");
         } else {
             ESP_LOGI(TAG, "Received %d bytes", len);
-            uart_write_bytes(uart_num, &confMess, 1);
+            AskForPicture();
             tcpavail = 1;
-            // send() can return less bytes than supplied length.
-            // Walk-around for robust implementation. 
-            /*
-            int to_write = 4800;
-            while (to_write > 0) {
-                int written = send(sock, &data, to_write, 0);
-                if (written < 0) {
-                    ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
-                }
-                to_write -= written;
-            }*/
             
         }
     } while (len > 0);
@@ -296,6 +286,7 @@ static void tcp_server_init(void *arg)
     ESP_LOGI(TAG, "Socket bound, port %d", PORT);
 
     err = listen(listen_sock, 1);
+
     if (err != 0) {
         ESP_LOGE(TAG, "Error occurred during listen: errno %d", errno);
         goto CLEAN_UP;
@@ -319,9 +310,6 @@ static void tcp_server_init(void *arg)
         ESP_LOGI(TAG, "Socket accepted ip address: %s", addr_str);   
         
         do_retransmit(sock);
-
-        //shutdown(sock, 0);
-        //close(sock);
 
     }
 
@@ -424,32 +412,19 @@ static void SPI_init_config(void)
 
 static void AskForPicture(void)
 {
-    //Enviando solicitud
-    spi_slave_transaction_t SpiTransaction;   //Se crea el objeto de transaccion y sus indicaciones
-    memset(recvbuf,0x30,sizeof(recvbuf));
-    memset(&SpiTransaction,0,sizeof(SpiTransaction)); //Dejar en 0 la transaccion
-
-    SpiTransaction.length = 3*8; //El tamaño es en bits
-    SpiTransaction.rx_buffer = recvbuf;    //Indica cual es el buffer de informacion
-
-    spi_slave_transmit(SPI2_HOST,&SpiTransaction,portMAX_DELAY);
-
-}
-
-static void AskForPicture2(void)
-{
     spi_slave_transaction_t spi_slave;
-    spi_slave_transaction_t* spi_out = &spi_slave;
     memset(rx_buffer,0x30,BUFFER_SIZE);
     memset(&spi_slave,0,sizeof(spi_slave));
-    memset(&spi_out,0,sizeof(spi_out)); 
 
     spi_slave.length = BUFFER_SIZE*8;
     spi_slave.rx_buffer = rx_buffer;
 
     //spi_slave_transmit(SPI2_HOST,&spi_slave, portMAX_DELAY);
     spi_slave_queue_trans(SPI2_HOST,&spi_slave,portMAX_DELAY);
-    printf("Recibido: %s\n", rx_buffer);
+    //spi_slave_transmit(SPI2_HOST,&spi_slave,portMAX_DELAY);
+    //printf("Bytes recibidos: %d\n",(spi_slave.trans_len/8));
+    //printf("Recibido: %s\n",rx_buffer);
+    
 }
 
 void app_main(void)
@@ -476,10 +451,14 @@ void app_main(void)
     xTaskCreate(TCPSendRobust,"Envio_datos_TCP",1024*4,NULL,4,NULL);
     */
 
-    //Inicializando el UART
+    //Configurando el SPI
     SPI_init_config();
-    ESP_LOGE(TAG,"Configurado SPI");
-    vTaskDelay(pdMS_TO_TICKS(10000));
-    AskForPicture2();
+    //Inicializando el NVS
+    nvs_init();
+    //Inicializando el WIFI
+    wifi_init_softap();
+
+    xTaskCreate(tcp_server_init,"TCPSocket",1024*4,NULL,configMAX_PRIORITIES,NULL);
+    xTaskCreate(TCPSendRobust,"Envio_datos_TCP",1024*4,configMAX_PRIORITIES-1,4,NULL);
 
 }
