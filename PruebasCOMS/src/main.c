@@ -217,6 +217,7 @@ static void TCPSendRobust(void *arg)
         {
             printf ("TCPEnviado\n");
             int to_write = BUFFER_SIZE;
+
             while (to_write > 0) {
                 int written = send(sock, &rx_buffer, to_write, 0);
                 if (written < 0) {
@@ -242,14 +243,17 @@ static void do_retransmit(const int sock)
         if (len < 0) {
             ESP_LOGE(TAG, "Error occurred during receiving: errno %d", errno);
         } else if (len == 0) {
-            ESP_LOGW(TAG, "Connection closed");
+            ESP_LOGE(TAG, "Connection closed");
         } else {
-            ESP_LOGI(TAG, "Received %d bytes", len);
+            //ESP_LOGI(TAG, "Received %d bytes", len);
             AskForPicture();
             tcpavail = 1;
             
         }
     } while (len > 0);
+
+    vTaskDelay(10/ portTICK_PERIOD_MS);
+
 }
 
 static void tcp_server_init(void *arg)
@@ -310,7 +314,8 @@ static void tcp_server_init(void *arg)
         ESP_LOGI(TAG, "Socket accepted ip address: %s", addr_str);   
         
         do_retransmit(sock);
-
+        //shutdown(sock, 0);
+        //close(sock);
     }
 
     CLEAN_UP:
@@ -319,7 +324,87 @@ static void tcp_server_init(void *arg)
 
 }
 
-static void servo_ledc_config(void)
+static void tcp_server_init2(void *pvParameters)
+{
+    char addr_str[128];
+    int addr_family = (int)pvParameters;
+    int ip_protocol = 0;
+    int keepAlive = 1;
+    int keepIdle = 5;
+    int keepInterval = 5;
+    int keepCount = 3;
+    struct sockaddr_storage dest_addr;
+
+    struct sockaddr_in *dest_addr_ip4 = (struct sockaddr_in *)&dest_addr;
+    dest_addr_ip4->sin_addr.s_addr = htonl(INADDR_ANY);
+    dest_addr_ip4->sin_family = AF_INET;
+    dest_addr_ip4->sin_port = htons(PORT);
+    ip_protocol = IPPROTO_IP;
+
+    int listen_sock = socket(addr_family, SOCK_STREAM, ip_protocol);
+    if (listen_sock < 0) {
+        ESP_LOGE(TAG, "Unable to create socket: errno %d", errno);
+        vTaskDelete(NULL);
+        return;
+    }
+    int opt = 1;
+    setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    ESP_LOGI(TAG, "Socket created");
+
+    int err = bind(listen_sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+    if (err != 0) {
+        ESP_LOGE(TAG, "Socket unable to bind: errno %d", errno);
+        ESP_LOGE(TAG, "IPPROTO: %d", addr_family);
+        goto CLEAN_UP;
+    }
+    ESP_LOGI(TAG, "Socket bound, port %d", PORT);
+
+    err = listen(listen_sock, 1);
+    if (err != 0) {
+        ESP_LOGE(TAG, "Error occurred during listen: errno %d", errno);
+        goto CLEAN_UP;
+    }
+
+    while (1) {
+
+        ESP_LOGI(TAG, "Socket listening");
+
+        struct sockaddr_storage source_addr; // Large enough for both IPv4 or IPv6
+        socklen_t addr_len = sizeof(source_addr);
+        sock = accept(listen_sock, (struct sockaddr *)&source_addr, &addr_len);
+        if (sock < 0) {
+            ESP_LOGE(TAG, "Unable to accept connection: errno %d", errno);
+            break;
+        }
+        ESP_LOGE(TAG,"Sock value: %d\n",sock);
+
+        // Set tcp keepalive option
+        setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &keepAlive, sizeof(int));
+        setsockopt(sock, IPPROTO_TCP, TCP_KEEPIDLE, &keepIdle, sizeof(int));
+        setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &keepInterval, sizeof(int));
+        setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &keepCount, sizeof(int));
+
+        if (source_addr.ss_family == PF_INET) {
+            inet_ntoa_r(((struct sockaddr_in *)&source_addr)->sin_addr, addr_str, sizeof(addr_str) - 1);
+        }
+
+        ESP_LOGI(TAG, "Socket accepted ip address: %s", addr_str);
+
+        do_retransmit(sock);
+
+        //shutdown(sock, 0);
+        //close(sock);
+        vTaskDelay(10/ portTICK_PERIOD_MS);
+    }
+
+CLEAN_UP:
+    close(listen_sock);
+    //vTaskDelete(NULL);
+
+}
+
+void servo_ledc_config(void)
 {
     ledc_timer_config_t ledc_timer = {
         .speed_mode       = LEDC_MODE,
@@ -373,7 +458,7 @@ void my_pre_cb(spi_slave_transaction_t *trans)
     gpio_set_level(SPI_HAND, 1);
 }
 
-static void SPI_init_config(void)
+void SPI_init_config(void)
 {
     //Inicializando la configuracion del SPI
     spi_bus_config_t SpiConfig = 
@@ -419,11 +504,7 @@ static void AskForPicture(void)
     spi_slave.length = BUFFER_SIZE*8;
     spi_slave.rx_buffer = rx_buffer;
 
-    //spi_slave_transmit(SPI2_HOST,&spi_slave, portMAX_DELAY);
     spi_slave_queue_trans(SPI2_HOST,&spi_slave,portMAX_DELAY);
-    //spi_slave_transmit(SPI2_HOST,&spi_slave,portMAX_DELAY);
-    //printf("Bytes recibidos: %d\n",(spi_slave.trans_len/8));
-    //printf("Recibido: %s\n",rx_buffer);
     
 }
 
@@ -455,10 +536,12 @@ void app_main(void)
     SPI_init_config();
     //Inicializando el NVS
     nvs_init();
+    //ESP_ERROR_CHECK(nvs_flash_init());
     //Inicializando el WIFI
     wifi_init_softap();
 
-    xTaskCreate(tcp_server_init,"TCPSocket",1024*4,NULL,configMAX_PRIORITIES,NULL);
-    xTaskCreate(TCPSendRobust,"Envio_datos_TCP",1024*4,configMAX_PRIORITIES-1,4,NULL);
+    //xTaskCreate(tcp_server_init2,"TCPSocket",4096,(void*)AF_INET,2,NULL);
+    xTaskCreate(tcp_server_init2,"TCPSocket",4096,NULL,3,NULL);
+    xTaskCreate(TCPSendRobust,"Envio_datos_TCP",4096,NULL,2,NULL);
 
 }
