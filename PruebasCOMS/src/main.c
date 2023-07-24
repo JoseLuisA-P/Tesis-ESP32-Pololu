@@ -28,6 +28,7 @@
 #include "driver/ledc.h"
 //Relacionado al SPI
 #include "driver/spi_slave.h"
+#include "driver/spi_master.h"
 
 // Setup UART buffered IO with event queue
 static const int uart_buffer_size = 4800;
@@ -87,15 +88,18 @@ float dutyValue = 0;
 #define SPI_HAND    GPIO_NUM_9
 
 //Variables para las solicitudes
-#define BUFFER_SIZE 4800 //antes 1024
+#define BUFFER_SIZE 1600 //antes 1024
 char rx_buffer[BUFFER_SIZE];
 char recvbuf[3];
+uint8_t SPIAsk = 0;
+spi_device_interface_config_t CamH7;
+spi_device_handle_t  SPIHandle;
 
 //TAG para el log de errores o informacion
 static const char *TAG = "Prueba";
 
 //Prototipos para algunas funciones
-static void AskForPicture(void);
+static void AskForPicture(void *arg);
 
 void uart_init_config(void)
 {   
@@ -247,7 +251,7 @@ static void do_retransmit(const int sock)
             ESP_LOGE(TAG, "Connection closed");
         } else {
             //ESP_LOGI(TAG, "Received %d bytes", len);
-            AskForPicture();
+            //AskForPicture();
             
         }
     } while (len > 0);
@@ -279,18 +283,7 @@ void handle_socket(void *pvParameters)
             char pic_send = 'A';
             if(strchr(rx_buffer,pic_send) != NULL)
             {   
-                //Pide primero por la imagen
-                AskForPicture();
-                int to_write = BUFFER_SIZE;
-
-                while (to_write > 0) {
-                    int written = send(client_socket, &rx_buffer, to_write, 0);
-                    if (written < 0) {
-                        ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
-                        tcpavail = 0;
-                    }
-                    to_write -= written;
-                }
+                SPIAsk = 1;
             }
         }
     }
@@ -498,7 +491,7 @@ void SPI_init_config(void)
         .sclk_io_num = SPI_CLK,
         .quadhd_io_num = -1,
         .quadwp_io_num = -1,
-        .max_transfer_sz = 9600,
+        .max_transfer_sz = 4800,
     };
 
     spi_slave_interface_config_t slavecfg =
@@ -511,7 +504,7 @@ void SPI_init_config(void)
         .post_trans_cb = my_pre_cb
     };
 
-    ESP_ERROR_CHECK(spi_slave_initialize(SPI2_HOST,&SpiConfig,&slavecfg,SPI_DMA_DISABLED));
+    ESP_ERROR_CHECK(spi_slave_initialize(SPI2_HOST,&SpiConfig,&slavecfg,SPI_DMA_CH_AUTO));
 
     //Configurando el pin del handshake para solicitar envio de datos y recepcion
     gpio_config_t io_hand_conf={
@@ -525,8 +518,45 @@ void SPI_init_config(void)
 
 }
 
-static void AskForPicture(void)
+void SPIMaster_init_config(void)
 {
+    //Inicializando la configuracion del SPI
+    spi_bus_config_t SpiConfig = 
+    {
+        .miso_io_num = SPI_MISO,
+        .mosi_io_num = SPI_MOSI,
+        .sclk_io_num = SPI_CLK,
+        .quadhd_io_num = -1,
+        .quadwp_io_num = -1,
+        .max_transfer_sz = 4800,
+    };
+
+    ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST,&SpiConfig,SPI_DMA_CH_AUTO));
+
+    CamH7.clock_speed_hz = 10*1000*1000;
+    CamH7.mode = 0;
+    CamH7.spics_io_num = SPI_CS;
+    CamH7.queue_size = 1;
+    
+    ESP_ERROR_CHECK(spi_bus_add_device(SPI2_HOST,&CamH7,&SPIHandle));
+
+    //Configurando el pin del handshake para solicitar envio de datos y recepcion
+    gpio_config_t io_hand_conf={
+        .intr_type=GPIO_INTR_DISABLE,
+        .mode=GPIO_MODE_OUTPUT,
+        .pin_bit_mask=(1<<SPI_HAND)
+    };
+
+    gpio_config(&io_hand_conf);
+    gpio_set_level(SPI_HAND, 1);
+
+}
+
+static void AskForPicture(void *arg)
+{   
+    while(1){
+    if(SPIAsk)
+    {
     spi_slave_transaction_t spi_slave;
     memset(rx_buffer,0x30,BUFFER_SIZE);
     memset(&spi_slave,0,sizeof(spi_slave));
@@ -536,7 +566,29 @@ static void AskForPicture(void)
 
     spi_slave_transmit(SPI2_HOST,&spi_slave,portMAX_DELAY);
     //spi_slave_queue_trans(SPI2_HOST,&spi_slave,portMAX_DELAY);
+    //spi_slave_get_trans_result(SPI2_HOST,&spi_dummy,portMAX_DELAY);
+    SPIAsk = 0;
+    tcpavail = 1;
+    }
+
+    vTaskDelay(10/ portTICK_PERIOD_MS);
+    }
+}
+
+void MasterASKP(void)
+{
+    //spi_device_acquire_bus(SPIHandle,portMAX_DELAY);
+
+    spi_transaction_t transaction;
+    memset(&transaction,0,sizeof(transaction));
     
+    transaction.length = BUFFER_SIZE*8;
+    transaction.rx_buffer = &rx_buffer;
+
+    spi_device_polling_transmit(SPIHandle,&transaction);
+
+    //spi_device_release_bus(SPIHandle);
+
 }
 
 void app_main(void)
@@ -548,11 +600,10 @@ void app_main(void)
     nvs_init();
     //Inicializando el WIFI
     wifi_init_softap();
-    //tcp_socket_init();
 
-    xTaskCreate(tcp_socket_init,"TCPSocket",4096,NULL,configMAX_PRIORITIES-1,NULL);
-    //xTaskCreate(TCPSendRobust,"Envio_datos_TCP",4096,NULL,2,NULL);
-
+    xTaskCreate(tcp_socket_init,"TCPSocket",4096,NULL,configMAX_PRIORITIES-3,NULL);
+    xTaskCreate(AskForPicture,"SPIRetrieve",4096,NULL,configMAX_PRIORITIES-1,NULL);
+    xTaskCreate(TCPSendRobust,"TCPSend",4096,NULL,configMAX_PRIORITIES-1,NULL);
     /*
      //Actualizacion del valor del PWM (angulo del servo)
     servo_ledc_config();
