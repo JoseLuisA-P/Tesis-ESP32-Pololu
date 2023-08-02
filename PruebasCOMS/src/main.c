@@ -26,9 +26,12 @@
 #include <string.h>
 //Manejo de los LEDC
 #include "driver/ledc.h"
+//Relacionado al SPI
+#include "driver/spi_slave.h"
+#include "driver/spi_master.h"
 
 // Setup UART buffered IO with event queue
-static const int uart_buffer_size = 1024*5;
+static const int uart_buffer_size = 4800;
 
 // Puertos y conexiones a utilizar
 //TX y RX asignados libremente
@@ -36,20 +39,24 @@ static const int uart_buffer_size = 1024*5;
 #define RXD_PIN             (GPIO_NUM_5) 
 #define uart_num            UART_NUM_2
 int num = 0;
-char data[1024*5+1];
+//char data[4800+1];
+uint8_t data[4800];
 char confMess = 'B';
 char negMess = 'A';
 uint8_t avail = 0;
+int tam = 0;
+int mesSize = 0;
 
 //Parametros para la configuracion del servidor
-#define SSID                "ESP32-AP"
-#define WIFIPASSWORD        "1234567890"
+#define SSID                "Pololu3Pi+"
+#define WIFIPASSWORD        "MT30062023"
 #define WIFICHANNEL         2
 #define MAXCONNECTIONS      5
 
 //Puerto para la comunicacion
 #define PORT 3333
 int sock;
+int LisSock;
 uint8_t tcpavail = 0;
 
 //Parametros para configurar el timer del LEDC
@@ -72,8 +79,27 @@ const float minDuty = 204.0;
 const float maxDuty = 1024.0;
 float dutyValue = 0;
 
+//Configuracion de pines para el SPI
+#define SPI_NAME    SPI2_HOST
+#define SPI_MISO    GPIO_NUM_37
+#define SPI_MOSI    GPIO_NUM_35
+#define SPI_CLK     GPIO_NUM_36
+#define SPI_CS      GPIO_NUM_34
+#define SPI_HAND    GPIO_NUM_9
+
+//Variables para las solicitudes
+#define BUFFER_SIZE 1600 //antes 1024
+char rx_buffer[BUFFER_SIZE];
+char recvbuf[3];
+uint8_t SPIAsk = 0;
+spi_device_interface_config_t CamH7;
+spi_device_handle_t  SPIHandle;
+
 //TAG para el log de errores o informacion
 static const char *TAG = "Prueba";
+
+//Prototipos para algunas funciones
+static void AskForPicture(void *arg);
 
 void uart_init_config(void)
 {   
@@ -100,8 +126,8 @@ static void tx_task(void *arg)
     while (1) {	
 
         if(avail > 0){
-            //uart_write_bytes(uart_num, &data, uart_buffer_size);
-            printf("Enviado\n");
+            uart_write_bytes(uart_num,&data, tam);
+            //uart_wait_tx_done(uart_num,100/portTICK_PERIOD_MS);
             avail = 0;
         }
         vTaskDelay(10/ portTICK_PERIOD_MS);
@@ -112,12 +138,13 @@ static void rx_task(void *arg)
 {
     while(1)
     {
-        const int tam = uart_read_bytes(uart_num,data,uart_buffer_size, 100/ portTICK_PERIOD_MS);
+        uart_get_buffered_data_len(uart_num, (size_t*)&tam);
+        tam = uart_read_bytes(uart_num,data, tam, 100/ portTICK_PERIOD_MS);
         if (tam > 0) {
-            printf ("Recibido\n");
-            //avail = 1;
+            avail = 1;
             //tcpavail = 1;
         }
+        vTaskDelay(10/ portTICK_PERIOD_MS);
     }
     
 }
@@ -194,12 +221,12 @@ static void TCPSendRobust(void *arg)
         if(tcpavail>0)
         {
             printf ("TCPEnviado\n");
-            int to_write = 4800;
+            int to_write = BUFFER_SIZE;
+
             while (to_write > 0) {
-                int written = send(sock, &data, to_write, 0);
+                int written = send(sock, &rx_buffer, to_write, 0);
                 if (written < 0) {
                     ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
-                    uart_write_bytes(uart_num, &negMess, 1);
                     tcpavail = 0;
                 }
                 to_write -= written;
@@ -221,25 +248,115 @@ static void do_retransmit(const int sock)
         if (len < 0) {
             ESP_LOGE(TAG, "Error occurred during receiving: errno %d", errno);
         } else if (len == 0) {
-            ESP_LOGW(TAG, "Connection closed");
+            ESP_LOGE(TAG, "Connection closed");
         } else {
-            ESP_LOGI(TAG, "Received %d bytes", len);
-            uart_write_bytes(uart_num, &confMess, 1);
-            tcpavail = 1;
-            // send() can return less bytes than supplied length.
-            // Walk-around for robust implementation. 
-            /*
-            int to_write = 4800;
-            while (to_write > 0) {
-                int written = send(sock, &data, to_write, 0);
-                if (written < 0) {
-                    ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
-                }
-                to_write -= written;
-            }*/
+            //ESP_LOGI(TAG, "Received %d bytes", len);
+            //AskForPicture();
             
         }
     } while (len > 0);
+
+    vTaskDelay(10/ portTICK_PERIOD_MS);
+
+}
+
+void handle_socket(void *pvParameters)
+{
+    int client_socket = (int)pvParameters;
+
+    while(1) 
+    {
+        int len;
+        char rx_buffer[10];
+        len = recv(client_socket, rx_buffer, sizeof(rx_buffer)-1, 0);
+
+        if (len < 0) {
+            ESP_LOGE(TAG, "Error occurred during receiving: errno %d", errno);
+            break;
+
+        } else if (len == 0) {
+            ESP_LOGE(TAG, "Connection closed");
+            break;
+
+        } else {
+            ESP_LOGI(TAG, "Received %d bytes", len);
+            char pic_send = 'A';
+            if(strchr(rx_buffer,pic_send) != NULL)
+            {   
+                SPIAsk = 1;
+            }
+        }
+    }
+    close(client_socket);
+    vTaskDelete(NULL);
+}
+
+static void tcp_socket_init(void *arg) 
+{
+    int addr_family = AF_INET;
+    int ip_protocol = 0;
+    struct sockaddr_in6 dest_addr;
+    //memset(&dest_addr,0,sizeof(dest_addr));
+
+    struct sockaddr_in *dest_addr_ip4 = (struct sockaddr_in *)&dest_addr;
+    dest_addr_ip4->sin_addr.s_addr = htonl(INADDR_ANY);
+    dest_addr_ip4->sin_family = AF_INET;
+    dest_addr_ip4->sin_port = htons(PORT);
+    ip_protocol = IPPROTO_IP;
+
+    if(!LisSock)
+    {
+        LisSock = socket(addr_family, SOCK_STREAM, ip_protocol);
+
+        if (LisSock < 0) {
+            ESP_LOGE(TAG, "Unable to create socket: errno %d", errno);
+            return;
+        }
+        int opt = 1;
+        setsockopt(LisSock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+        ESP_LOGI(TAG, "Socket created");
+    }
+
+    int err = bind(LisSock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+    if (err != 0) {
+        ESP_LOGE(TAG, "Socket unable to bind: errno %d", errno);
+        ESP_LOGE(TAG, "IPPROTO: %d", addr_family);
+        close(LisSock);
+    }
+    ESP_LOGI(TAG, "Socket bound, port %d", PORT);
+    //fcntl(LisSock,F_SETFL,O_NONBLOCK); //Para ser no bloqueante
+
+    err = listen(LisSock, 1);
+
+    if (err != 0) {
+        ESP_LOGE(TAG, "Error occurred during listen: errno %d", errno);
+        close(LisSock);
+    }
+
+    ESP_LOGI(TAG,"Socket Listening");    
+
+    while(1)
+    {
+        char addr_str[128];
+        struct sockaddr_in source_addr;
+        uint addr_len = sizeof(source_addr);
+
+        sock = accept(LisSock, (struct sockaddr *)&source_addr, &addr_len);
+
+        if (sock < 0) {
+            ESP_LOGE(TAG, "Unable to accept connection: errno %d", errno);
+        } 
+        else 
+        {   
+            inet_ntoa_r(((struct sockaddr_in *)&source_addr)->sin_addr.s_addr, addr_str, sizeof(addr_str) - 1);
+            ESP_LOGI(TAG, "Socket accepted ip address: %s", addr_str);
+            xTaskCreate(handle_socket,"Connection",4096,(void *)sock,5,NULL);
+            vTaskDelay(10/ portTICK_PERIOD_MS);
+        }
+        
+    }
+
 }
 
 static void tcp_server_init(void *arg)
@@ -276,6 +393,7 @@ static void tcp_server_init(void *arg)
     ESP_LOGI(TAG, "Socket bound, port %d", PORT);
 
     err = listen(listen_sock, 1);
+
     if (err != 0) {
         ESP_LOGE(TAG, "Error occurred during listen: errno %d", errno);
         goto CLEAN_UP;
@@ -299,10 +417,8 @@ static void tcp_server_init(void *arg)
         ESP_LOGI(TAG, "Socket accepted ip address: %s", addr_str);   
         
         do_retransmit(sock);
-
-        //shutdown(sock, 0);
+        shutdown(sock, 0);
         //close(sock);
-
     }
 
     CLEAN_UP:
@@ -311,7 +427,7 @@ static void tcp_server_init(void *arg)
 
 }
 
-static void servo_ledc_config(void)
+void servo_ledc_config(void)
 {
     ledc_timer_config_t ledc_timer = {
         .speed_mode       = LEDC_MODE,
@@ -353,18 +469,143 @@ static void SetAngle(int channel, int angle)
     ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, channel));
 }
 
+void my_post_cb(spi_slave_transaction_t *trans) 
+{
+    //Utilizado para activar el pin despues de la transaccion
+    gpio_set_level(SPI_HAND, 0);
+}
+
+void my_pre_cb(spi_slave_transaction_t *trans) 
+{
+    //Utilizado para apagar el pin antes de la transaccion
+    gpio_set_level(SPI_HAND, 1);
+}
+
+void SPI_init_config(void)
+{
+    //Inicializando la configuracion del SPI
+    spi_bus_config_t SpiConfig = 
+    {
+        .miso_io_num = SPI_MISO,
+        .mosi_io_num = SPI_MOSI,
+        .sclk_io_num = SPI_CLK,
+        .quadhd_io_num = -1,
+        .quadwp_io_num = -1,
+        .max_transfer_sz = 4800,
+    };
+
+    spi_slave_interface_config_t slavecfg =
+    {
+        .mode = 0,
+        .spics_io_num = SPI_CS,
+        .queue_size = 3,
+        .flags = 0,
+        .post_setup_cb = my_post_cb,
+        .post_trans_cb = my_pre_cb
+    };
+
+    ESP_ERROR_CHECK(spi_slave_initialize(SPI2_HOST,&SpiConfig,&slavecfg,SPI_DMA_CH_AUTO));
+
+    //Configurando el pin del handshake para solicitar envio de datos y recepcion
+    gpio_config_t io_hand_conf={
+        .intr_type=GPIO_INTR_DISABLE,
+        .mode=GPIO_MODE_OUTPUT,
+        .pin_bit_mask=(1<<SPI_HAND)
+    };
+
+    gpio_config(&io_hand_conf);
+    gpio_set_level(SPI_HAND, 1);
+
+}
+
+void SPIMaster_init_config(void)
+{
+    //Inicializando la configuracion del SPI
+    spi_bus_config_t SpiConfig = 
+    {
+        .miso_io_num = SPI_MISO,
+        .mosi_io_num = SPI_MOSI,
+        .sclk_io_num = SPI_CLK,
+        .quadhd_io_num = -1,
+        .quadwp_io_num = -1,
+        .max_transfer_sz = 4800,
+    };
+
+    ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST,&SpiConfig,SPI_DMA_CH_AUTO));
+
+    CamH7.clock_speed_hz = 10*1000*1000;
+    CamH7.mode = 0;
+    CamH7.spics_io_num = SPI_CS;
+    CamH7.queue_size = 1;
+    
+    ESP_ERROR_CHECK(spi_bus_add_device(SPI2_HOST,&CamH7,&SPIHandle));
+
+    //Configurando el pin del handshake para solicitar envio de datos y recepcion
+    gpio_config_t io_hand_conf={
+        .intr_type=GPIO_INTR_DISABLE,
+        .mode=GPIO_MODE_OUTPUT,
+        .pin_bit_mask=(1<<SPI_HAND)
+    };
+
+    gpio_config(&io_hand_conf);
+    gpio_set_level(SPI_HAND, 1);
+
+}
+
+static void AskForPicture(void *arg)
+{   
+    while(1){
+    if(SPIAsk)
+    {
+    spi_slave_transaction_t spi_slave;
+    memset(rx_buffer,0x30,BUFFER_SIZE);
+    memset(&spi_slave,0,sizeof(spi_slave));
+
+    spi_slave.length = BUFFER_SIZE*8;
+    spi_slave.rx_buffer = rx_buffer;
+
+    spi_slave_transmit(SPI2_HOST,&spi_slave,portMAX_DELAY);
+    //spi_slave_queue_trans(SPI2_HOST,&spi_slave,portMAX_DELAY);
+    //spi_slave_get_trans_result(SPI2_HOST,&spi_dummy,portMAX_DELAY);
+    SPIAsk = 0;
+    tcpavail = 1;
+    }
+
+    vTaskDelay(10/ portTICK_PERIOD_MS);
+    }
+}
+
+void MasterASKP(void)
+{
+    //spi_device_acquire_bus(SPIHandle,portMAX_DELAY);
+
+    spi_transaction_t transaction;
+    memset(&transaction,0,sizeof(transaction));
+    
+    transaction.length = BUFFER_SIZE*8;
+    transaction.rx_buffer = &rx_buffer;
+
+    spi_device_polling_transmit(SPIHandle,&transaction);
+
+    //spi_device_release_bus(SPIHandle);
+
+}
+
 void app_main(void)
 {   
 
-    
-    //Inicializando el UART
-    uart_init_config();
+    //Configurando el SPI
+    SPI_init_config();
     //Inicializando el NVS
     nvs_init();
     //Inicializando el WIFI
     wifi_init_softap();
 
-     // Set the LEDC peripheral configuration
+    xTaskCreate(tcp_socket_init,"TCPSocket",4096,NULL,configMAX_PRIORITIES-3,NULL);
+    xTaskCreate(AskForPicture,"SPIRetrieve",4096,NULL,configMAX_PRIORITIES-1,NULL);
+    xTaskCreate(TCPSendRobust,"TCPSend",4096,NULL,configMAX_PRIORITIES-1,NULL);
+    /*
+     //Actualizacion del valor del PWM (angulo del servo)
     servo_ledc_config();
     vTaskDelay(pdMS_TO_TICKS(2000));
     SetAngle(SERVO1_CHANNEL,0);
@@ -372,8 +613,5 @@ void app_main(void)
     SetAngle(SERVO1_CHANNEL,90);
     vTaskDelay(pdMS_TO_TICKS(2000));
     SetAngle(SERVO1_CHANNEL,180);
-
-    xTaskCreate(rx_task, "uart_rx_task", 1024, NULL, 2, NULL);
-    xTaskCreate(tcp_server_init,"TCPSocket",1024*4,NULL,3,NULL);
-    xTaskCreate(TCPSendRobust,"Envio_datos_TCP",1024*4,NULL,4,NULL);
+    */
 }
