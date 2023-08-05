@@ -30,28 +30,11 @@
 #include "driver/spi_slave.h"
 #include "driver/spi_master.h"
 
-// Setup UART buffered IO with event queue
-static const int uart_buffer_size = 4800;
-
-// Puertos y conexiones a utilizar
-//TX y RX asignados libremente
-#define TXD_PIN             (GPIO_NUM_4)
-#define RXD_PIN             (GPIO_NUM_5) 
-#define uart_num            UART_NUM_2
-int num = 0;
-//char data[4800+1];
-uint8_t data[4800];
-char confMess = 'B';
-char negMess = 'A';
-uint8_t avail = 0;
-int tam = 0;
-int mesSize = 0;
-
 //Parametros para la configuracion del servidor
 #define SSID                "Pololu3Pi+"
 #define WIFIPASSWORD        "MT30062023"
 #define WIFICHANNEL         2
-#define MAXCONNECTIONS      5
+#define MAXCONNECTIONS      1
 
 //Puerto para la comunicacion
 #define PORT 3333
@@ -100,54 +83,7 @@ static const char *TAG = "Prueba";
 
 //Prototipos para algunas funciones
 static void AskForPicture(void *arg);
-
-void uart_init_config(void)
-{   
-    const uart_config_t uart_config = {
-        .baud_rate = 921600*2,
-        .data_bits = UART_DATA_8_BITS,
-        .parity = UART_PARITY_DISABLE,
-        .stop_bits = UART_STOP_BITS_1,
-        .flow_ctrl = UART_HW_FLOWCTRL_CTS_RTS,
-        .source_clk = UART_SCLK_APB,
-    };
-    // Install UART driver using an event queue here
-    ESP_ERROR_CHECK(uart_driver_install(uart_num, uart_buffer_size, 0, 0, NULL, 0));
-    // Configure UART parameters
-    ESP_ERROR_CHECK(uart_param_config(uart_num, &uart_config)); 
-    // Set UART pins(TX: IO17, RX: IO16, NOT USED, NOT USED)
-    ESP_ERROR_CHECK(uart_set_pin(uart_num, TXD_PIN, RXD_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE)); 
-    
-}
-
-static void tx_task(void *arg)
-{
-
-    while (1) {	
-
-        if(avail > 0){
-            uart_write_bytes(uart_num,&data, tam);
-            //uart_wait_tx_done(uart_num,100/portTICK_PERIOD_MS);
-            avail = 0;
-        }
-        vTaskDelay(10/ portTICK_PERIOD_MS);
-    }
-}
-
-static void rx_task(void *arg)
-{
-    while(1)
-    {
-        uart_get_buffered_data_len(uart_num, (size_t*)&tam);
-        tam = uart_read_bytes(uart_num,data, tam, 100/ portTICK_PERIOD_MS);
-        if (tam > 0) {
-            avail = 1;
-            //tcpavail = 1;
-        }
-        vTaskDelay(10/ portTICK_PERIOD_MS);
-    }
-    
-}
+static void SetAngle(int channel, int angle);
 
 static void wifi_event_handler(void* arg, esp_event_base_t event_base,int32_t event_id, void* event_data)
 {
@@ -238,28 +174,6 @@ static void TCPSendRobust(void *arg)
     }
 }
 
-static void do_retransmit(const int sock)
-{
-    int len;
-    char rx_buffer[1];
-
-    do {
-        len = recv(sock, rx_buffer, sizeof(rx_buffer), 0);
-        if (len < 0) {
-            ESP_LOGE(TAG, "Error occurred during receiving: errno %d", errno);
-        } else if (len == 0) {
-            ESP_LOGE(TAG, "Connection closed");
-        } else {
-            //ESP_LOGI(TAG, "Received %d bytes", len);
-            //AskForPicture();
-            
-        }
-    } while (len > 0);
-
-    vTaskDelay(10/ portTICK_PERIOD_MS);
-
-}
-
 void handle_socket(void *pvParameters)
 {
     int client_socket = (int)pvParameters;
@@ -267,8 +181,8 @@ void handle_socket(void *pvParameters)
     while(1) 
     {
         int len;
-        char rx_buffer[10];
-        len = recv(client_socket, rx_buffer, sizeof(rx_buffer)-1, 0);
+        char rx2_buffer[4];
+        len = recv(client_socket, rx2_buffer, sizeof(rx2_buffer)-1, 0);
 
         if (len < 0) {
             ESP_LOGE(TAG, "Error occurred during receiving: errno %d", errno);
@@ -281,9 +195,17 @@ void handle_socket(void *pvParameters)
         } else {
             ESP_LOGI(TAG, "Received %d bytes", len);
             char pic_send = 'A';
-            if(strchr(rx_buffer,pic_send) != NULL)
-            {   
+            // if(strchr(rx2_buffer,pic_send) != NULL)
+            // {   
+            //     SPIAsk = 1;
+            // }
+            if(rx2_buffer[0]=='A')
+            {
                 SPIAsk = 1;
+            }
+            else if(rx2_buffer[0] == 'B')
+            {
+                SetAngle(SERVO1_CHANNEL,rx2_buffer[1]);
             }
         }
     }
@@ -356,74 +278,6 @@ static void tcp_socket_init(void *arg)
         }
         
     }
-
-}
-
-static void tcp_server_init(void *arg)
-{
-    char addr_str[128];
-    int addr_family = AF_INET;
-    int ip_protocol = 0;
-    struct sockaddr_in6 dest_addr;
-
-    struct sockaddr_in *dest_addr_ip4 = (struct sockaddr_in *)&dest_addr;
-    dest_addr_ip4->sin_addr.s_addr = htonl(INADDR_ANY);
-    dest_addr_ip4->sin_family = AF_INET;
-    dest_addr_ip4->sin_port = htons(PORT);
-    ip_protocol = IPPROTO_IP;
-
-    int listen_sock = socket(addr_family, SOCK_STREAM, ip_protocol);
-
-    if (listen_sock < 0) {
-        ESP_LOGE(TAG, "Unable to create socket: errno %d", errno);
-        return;
-    }
-
-    int opt = 1;
-    setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-    ESP_LOGI(TAG, "Socket created");
-
-    int err = bind(listen_sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
-    if (err != 0) {
-        ESP_LOGE(TAG, "Socket unable to bind: errno %d", errno);
-        ESP_LOGE(TAG, "IPPROTO: %d", addr_family);
-        goto CLEAN_UP;
-    }
-    ESP_LOGI(TAG, "Socket bound, port %d", PORT);
-
-    err = listen(listen_sock, 1);
-
-    if (err != 0) {
-        ESP_LOGE(TAG, "Error occurred during listen: errno %d", errno);
-        goto CLEAN_UP;
-    }
-
-    while(1)
-    {
-        ESP_LOGI(TAG,"Socket Listening");
-
-        struct sockaddr_in6 source_addr;
-        uint addr_len = sizeof(source_addr);
-
-        sock = accept(listen_sock, (struct sockaddr *)&source_addr, &addr_len);
-
-        if (sock < 0) {
-            ESP_LOGE(TAG, "Unable to accept connection: errno %d", errno);
-            break;
-        }
-        
-        inet_ntoa_r(((struct sockaddr_in *)&source_addr)->sin_addr.s_addr, addr_str, sizeof(addr_str) - 1);
-        ESP_LOGI(TAG, "Socket accepted ip address: %s", addr_str);   
-        
-        do_retransmit(sock);
-        shutdown(sock, 0);
-        //close(sock);
-    }
-
-    CLEAN_UP:
-        close(listen_sock);
-        vTaskDelete(NULL);
 
 }
 
@@ -518,40 +372,6 @@ void SPI_init_config(void)
 
 }
 
-void SPIMaster_init_config(void)
-{
-    //Inicializando la configuracion del SPI
-    spi_bus_config_t SpiConfig = 
-    {
-        .miso_io_num = SPI_MISO,
-        .mosi_io_num = SPI_MOSI,
-        .sclk_io_num = SPI_CLK,
-        .quadhd_io_num = -1,
-        .quadwp_io_num = -1,
-        .max_transfer_sz = 4800,
-    };
-
-    ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST,&SpiConfig,SPI_DMA_CH_AUTO));
-
-    CamH7.clock_speed_hz = 10*1000*1000;
-    CamH7.mode = 0;
-    CamH7.spics_io_num = SPI_CS;
-    CamH7.queue_size = 1;
-    
-    ESP_ERROR_CHECK(spi_bus_add_device(SPI2_HOST,&CamH7,&SPIHandle));
-
-    //Configurando el pin del handshake para solicitar envio de datos y recepcion
-    gpio_config_t io_hand_conf={
-        .intr_type=GPIO_INTR_DISABLE,
-        .mode=GPIO_MODE_OUTPUT,
-        .pin_bit_mask=(1<<SPI_HAND)
-    };
-
-    gpio_config(&io_hand_conf);
-    gpio_set_level(SPI_HAND, 1);
-
-}
-
 static void AskForPicture(void *arg)
 {   
     while(1){
@@ -575,22 +395,6 @@ static void AskForPicture(void *arg)
     }
 }
 
-void MasterASKP(void)
-{
-    //spi_device_acquire_bus(SPIHandle,portMAX_DELAY);
-
-    spi_transaction_t transaction;
-    memset(&transaction,0,sizeof(transaction));
-    
-    transaction.length = BUFFER_SIZE*8;
-    transaction.rx_buffer = &rx_buffer;
-
-    spi_device_polling_transmit(SPIHandle,&transaction);
-
-    //spi_device_release_bus(SPIHandle);
-
-}
-
 void app_main(void)
 {   
 
@@ -600,18 +404,18 @@ void app_main(void)
     nvs_init();
     //Inicializando el WIFI
     wifi_init_softap();
-
+    
+     //Actualizacion del valor del PWM (angulo del servo)
+    servo_ledc_config();
+    // vTaskDelay(pdMS_TO_TICKS(2000));
+    // SetAngle(SERVO1_CHANNEL,0);
+    // vTaskDelay(pdMS_TO_TICKS(2000));
+    // SetAngle(SERVO1_CHANNEL,90);
+    // vTaskDelay(pdMS_TO_TICKS(2000));
+    // SetAngle(SERVO1_CHANNEL,180);
+    
     xTaskCreate(tcp_socket_init,"TCPSocket",4096,NULL,configMAX_PRIORITIES-3,NULL);
     xTaskCreate(AskForPicture,"SPIRetrieve",4096,NULL,configMAX_PRIORITIES-1,NULL);
     xTaskCreate(TCPSendRobust,"TCPSend",4096,NULL,configMAX_PRIORITIES-1,NULL);
-    /*
-     //Actualizacion del valor del PWM (angulo del servo)
-    servo_ledc_config();
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    SetAngle(SERVO1_CHANNEL,0);
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    SetAngle(SERVO1_CHANNEL,90);
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    SetAngle(SERVO1_CHANNEL,180);
-    */
+    
 }
