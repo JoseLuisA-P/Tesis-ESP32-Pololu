@@ -24,8 +24,11 @@
 #include <lwip/netdb.h>
 //Manejo de Strings
 #include <string.h>
-//Manejo de los LEDC
+//Manejo de los servos
 #include "driver/ledc.h"
+#include "driver/mcpwm.h"
+#include "soc/mcpwm_reg.h"
+#include "soc/mcpwm_struct.h"
 //Relacionado al SPI
 #include "driver/spi_slave.h"
 #include "driver/spi_master.h"
@@ -45,7 +48,7 @@ uint8_t tcpavail = 0;
 //Parametros para configurar el timer del LEDC
 #define LEDC_TIMER              LEDC_TIMER_0
 #define LEDC_MODE               LEDC_LOW_SPEED_MODE
-#define LEDC_DUTY_RES           LEDC_TIMER_13_BIT // Resolucion del ciclo de trabajo de 13 bits
+#define LEDC_DUTY_RES           LEDC_TIMER_10_BIT // Resolucion del ciclo de trabajo de 13 bits
 
 //Parametros para configurar el canal y pin del servo con el LEDC
 #define SERVO1_CHANNEL          LEDC_CHANNEL_0
@@ -56,11 +59,11 @@ uint8_t tcpavail = 0;
 #define SERVO3_PIN              GPIO_NUM_3
 
 //Parametros para calcular el duty en base al angulo
-const float minDeg = 0.0;
-const float maxDeg = 180.0;
-const float minDuty = 204.0;
-const float maxDuty = 1024.0;
-float dutyValue = 0;
+const uint32_t minDeg = 0;
+const uint32_t maxDeg = 180;
+const uint32_t minDuty = 500;
+const uint32_t maxDuty = 1000;
+uint32_t dutyValue;
 
 //Configuracion de pines para el SPI
 #define SPI_NAME    SPI2_HOST
@@ -81,9 +84,27 @@ spi_device_handle_t  SPIHandle;
 //TAG para el log de errores o informacion
 static const char *TAG = "Prueba";
 
+//Control de los servos
+#define SERVO_MIN_PULSEWIDTH 400  // Minimum pulse width in microseconds
+#define SERVO_MAX_PULSEWIDTH 2400 // Maximum pulse width in microseconds
+#define SERVO_MAX_DEGREE 180      // Maximum angle in degrees
+
+typedef struct {
+    uint32_t joint1;
+    uint32_t joint2;
+    uint32_t gripper;
+    uint32_t duty_us1;
+    uint32_t duty_us2;
+    uint32_t duty_us3;
+}   ManSer;
+
+ManSer brazo = {5,5,5,0,0,0};
+
 //Prototipos para algunas funciones
 static void AskForPicture(void *arg);
-static void SetAngle(int channel, int angle);
+static void SetAngle(int channel, uint32_t angle);
+//void set_servo_angle(uint32_t angle);
+void updatePosition(uint32_t joint1, uint32_t joint2, uint32_t gripper);
 
 static void wifi_event_handler(void* arg, esp_event_base_t event_base,int32_t event_id, void* event_data)
 {
@@ -181,7 +202,7 @@ void handle_socket(void *pvParameters)
     while(1) 
     {
         int len;
-        char rx2_buffer[4];
+        char rx2_buffer[5];
         len = recv(client_socket, rx2_buffer, sizeof(rx2_buffer)-1, 0);
 
         if (len < 0) {
@@ -194,18 +215,13 @@ void handle_socket(void *pvParameters)
 
         } else {
             ESP_LOGI(TAG, "Received %d bytes", len);
-            char pic_send = 'A';
-            // if(strchr(rx2_buffer,pic_send) != NULL)
-            // {   
-            //     SPIAsk = 1;
-            // }
             if(rx2_buffer[0]=='A')
             {
                 SPIAsk = 1;
             }
             else if(rx2_buffer[0] == 'B')
             {
-                SetAngle(SERVO1_CHANNEL,rx2_buffer[1]);
+                updatePosition(rx2_buffer[1],rx2_buffer[2],rx2_buffer[3]);
             }
         }
     }
@@ -284,39 +300,29 @@ static void tcp_socket_init(void *arg)
 void servo_ledc_config(void)
 {
     ledc_timer_config_t ledc_timer = {
-        .speed_mode       = LEDC_MODE,
-        .timer_num        = LEDC_TIMER,
-        .duty_resolution  = LEDC_DUTY_RES,
+        .speed_mode       = LEDC_LOW_SPEED_MODE,
+        .timer_num        = LEDC_TIMER_0,
+        .duty_resolution  = LEDC_TIMER_13_BIT,
         .freq_hz          = 50, // (1/20 mS) O 50 Hz
         .clk_cfg          = LEDC_AUTO_CLK
     };
     ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer));
 
-    ledc_channel_config_t servo_channel[3];
-    //Configuracion del canal y pin del servo 1
-    servo_channel[0].channel = SERVO1_CHANNEL;
-    servo_channel[0].gpio_num = SERVO1_PIN;
-    //Configuracion del canal y pin del servo 2
-    servo_channel[1].channel = SERVO2_CHANNEL;
-    servo_channel[1].gpio_num = SERVO2_PIN;
-    //Configuracion del canal y pin del servo 3
-    servo_channel[2].channel = SERVO3_CHANNEL;
-    servo_channel[2].gpio_num = SERVO3_PIN;
-    //Configuracion de los parametros generales entre canales
-    for (size_t i = 0; i < 3; i++)
-    {
-        servo_channel[i].speed_mode =   LEDC_MODE;
-        servo_channel[i].timer_sel =    LEDC_TIMER;
-        servo_channel[i].intr_type =    LEDC_INTR_DISABLE;
-        servo_channel[i].duty =         615; //5% de duty o posicion 0 grados del servo
-        servo_channel[i].hpoint =       0;
+    ledc_channel_config_t servo_chanel1;
 
-        ESP_ERROR_CHECK(ledc_channel_config(&servo_channel[i]));
-    }
+    servo_chanel1.channel =      SERVO1_CHANNEL;
+    servo_chanel1.gpio_num =     SERVO1_PIN;
+    servo_chanel1.speed_mode =   LEDC_LOW_SPEED_MODE;
+    servo_chanel1.timer_sel =    LEDC_TIMER_0;
+    servo_chanel1.intr_type =    LEDC_INTR_DISABLE;
+    servo_chanel1.duty =         750; //5% de duty o posicion 0 grados del servo
+    servo_chanel1.hpoint =       0;
+
+    ESP_ERROR_CHECK(ledc_channel_config(&servo_chanel1));
 
 }
 
-static void SetAngle(int channel, int angle)
+static void SetAngle(int channel, uint32_t angle)
 {
     dutyValue = minDuty + ((maxDuty-minDuty)/(maxDeg-minDeg))*(angle-minDeg);
     ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, channel, dutyValue));
@@ -395,24 +401,120 @@ static void AskForPicture(void *arg)
     }
 }
 
+static void mcpwm_initialize(void)
+{
+    mcpwm_gpio_init(MCPWM_UNIT_0, MCPWM0A, GPIO_NUM_1); // Set GPIO 1 as the PWM0A, which is the output for MCPWM0
+    mcpwm_gpio_init(MCPWM_UNIT_0, MCPWM1A, GPIO_NUM_2);
+    mcpwm_gpio_init(MCPWM_UNIT_0, MCPWM2A, GPIO_NUM_3);
+
+    mcpwm_config_t pwm_config;
+    pwm_config.frequency = 50;                       // Set frequency in Hz (50Hz for most servos)
+    pwm_config.cmpr_a = 0;                           // Initial duty cycle in %, 0% for 0-degree position
+    pwm_config.counter_mode = MCPWM_UP_COUNTER;       // Up counter mode
+    pwm_config.duty_mode = MCPWM_DUTY_MODE_0;         // Active high PWM duty mode
+    
+    mcpwm_init(MCPWM_UNIT_0, MCPWM_TIMER_0, &pwm_config);
+    mcpwm_init(MCPWM_UNIT_0, MCPWM_TIMER_1, &pwm_config);
+    mcpwm_init(MCPWM_UNIT_0, MCPWM_TIMER_2, &pwm_config);
+}
+
+// void set_servo_angle(uint32_t angle)
+// {
+//     if (angle > SERVO_MAX_DEGREE)
+//     {
+//         angle = SERVO_MAX_DEGREE; //En caso de error, limita el angulo
+//     }
+//     servo1.angle = angle;
+//     servo1.duty_us = (SERVO_MIN_PULSEWIDTH + (((SERVO_MAX_PULSEWIDTH - SERVO_MIN_PULSEWIDTH) * angle) / SERVO_MAX_DEGREE));
+//     mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, servo1.duty_us);
+// }
+
+void updatePosition(uint32_t joint1, uint32_t joint2, uint32_t gripper)
+{
+    //Truncando los valores para evitar problemas
+    if(joint1 > SERVO_MAX_DEGREE)joint1 = SERVO_MAX_DEGREE;
+    //if(joint1 < 0)joint1 = 0;
+
+    if(joint2 > SERVO_MAX_DEGREE)joint2 = SERVO_MAX_DEGREE;
+    //if(joint2 < 0)joint2 = 0;
+
+    if(gripper > SERVO_MAX_DEGREE)gripper = SERVO_MAX_DEGREE;
+    //if(gripper < 0)gripper = 0;
+
+    uint32_t step1,step2,step3;
+    step1 = brazo.joint1;
+    step2 = brazo.joint2;
+    step3 = brazo.gripper;
+
+    while((brazo.joint1 != joint1) | (brazo.joint2 != joint2) | (brazo.gripper != gripper))
+    {
+        brazo.joint1 = step1;
+        brazo.joint2 = step2;
+        brazo.gripper = step3;
+
+        if(step1>joint1)
+        {
+            brazo.duty_us1 = (SERVO_MIN_PULSEWIDTH + (((SERVO_MAX_PULSEWIDTH - SERVO_MIN_PULSEWIDTH) * step1) / SERVO_MAX_DEGREE));
+            mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, brazo.duty_us1);
+            step1--;
+            
+        }
+        else if(step1<joint1)
+        {
+            brazo.duty_us1 = (SERVO_MIN_PULSEWIDTH + (((SERVO_MAX_PULSEWIDTH - SERVO_MIN_PULSEWIDTH) * step1) / SERVO_MAX_DEGREE));
+            mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, brazo.duty_us1);
+            step1++; 
+            
+        }
+
+        if(step2>joint2)
+        {
+            brazo.duty_us2 = (SERVO_MIN_PULSEWIDTH + (((SERVO_MAX_PULSEWIDTH - SERVO_MIN_PULSEWIDTH) * step2) / SERVO_MAX_DEGREE));
+            mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_1, MCPWM_OPR_A, brazo.duty_us2);
+            step2--;
+            
+        }
+        else if(step2<joint2)
+        {
+            brazo.duty_us2 = (SERVO_MIN_PULSEWIDTH + (((SERVO_MAX_PULSEWIDTH - SERVO_MIN_PULSEWIDTH) * step2) / SERVO_MAX_DEGREE));
+            mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_1, MCPWM_OPR_A, brazo.duty_us2);
+            step2++; 
+            
+        }
+
+        if(step3>gripper)
+        {
+            brazo.duty_us3 = (SERVO_MIN_PULSEWIDTH + (((SERVO_MAX_PULSEWIDTH - SERVO_MIN_PULSEWIDTH) * step3) / SERVO_MAX_DEGREE));
+            mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_2, MCPWM_OPR_A, brazo.duty_us3);
+            step3--;
+            
+        }
+        else if(step3<gripper)
+        {
+            brazo.duty_us3 = (SERVO_MIN_PULSEWIDTH + (((SERVO_MAX_PULSEWIDTH - SERVO_MIN_PULSEWIDTH) * step3) / SERVO_MAX_DEGREE));
+            mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_2, MCPWM_OPR_A, brazo.duty_us3);
+            step3++; 
+            
+        }
+
+        vTaskDelay(50 / portTICK_PERIOD_MS);
+    }
+
+}
+
 void app_main(void)
 {   
-
+    mcpwm_initialize();
+    //set_servo_angle(0); //Colocarlo en 0
+    updatePosition(0,0,0);
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+    
     //Configurando el SPI
     SPI_init_config();
     //Inicializando el NVS
     nvs_init();
     //Inicializando el WIFI
     wifi_init_softap();
-    
-     //Actualizacion del valor del PWM (angulo del servo)
-    servo_ledc_config();
-    // vTaskDelay(pdMS_TO_TICKS(2000));
-    // SetAngle(SERVO1_CHANNEL,0);
-    // vTaskDelay(pdMS_TO_TICKS(2000));
-    // SetAngle(SERVO1_CHANNEL,90);
-    // vTaskDelay(pdMS_TO_TICKS(2000));
-    // SetAngle(SERVO1_CHANNEL,180);
     
     xTaskCreate(tcp_socket_init,"TCPSocket",4096,NULL,configMAX_PRIORITIES-3,NULL);
     xTaskCreate(AskForPicture,"SPIRetrieve",4096,NULL,configMAX_PRIORITIES-1,NULL);
