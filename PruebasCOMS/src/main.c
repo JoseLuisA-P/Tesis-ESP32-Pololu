@@ -32,6 +32,8 @@
 //Relacionado al SPI
 #include "driver/spi_slave.h"
 #include "driver/spi_master.h"
+//Codificando con CBOR
+#include "../src/cbor.h"
 
 //Parametros para la configuracion del servidor
 #define SSID                "Pololu3Pi+"
@@ -74,9 +76,9 @@ uint32_t dutyValue;
 #define SPI_HAND    GPIO_NUM_9
 
 //Variables para las solicitudes
-#define BUFFER_SIZE 1600 //antes 1024
+#define BUFFER_SIZE 4800 //antes 1600
 char rx_buffer[BUFFER_SIZE];
-char recvbuf[3];
+//char recvbuf[3];
 uint8_t SPIAsk = 0;
 spi_device_interface_config_t CamH7;
 spi_device_handle_t  SPIHandle;
@@ -100,11 +102,14 @@ typedef struct {
 
 ManSer brazo = {5,5,5,0,0,0};
 
+uint32_t configj1,configj2,configj3;
+uint32_t step1,step2,step3;
+
 //Prototipos para algunas funciones
 static void AskForPicture(void *arg);
 static void SetAngle(int channel, uint32_t angle);
-//void set_servo_angle(uint32_t angle);
-void updatePosition(uint32_t joint1, uint32_t joint2, uint32_t gripper);
+//void updatePosition(uint32_t joint1, uint32_t joint2, uint32_t gripper);
+uint8_t* encode_cbor(const char* data, size_t* mesSize);
 
 static void wifi_event_handler(void* arg, esp_event_base_t event_base,int32_t event_id, void* event_data)
 {
@@ -178,10 +183,14 @@ static void TCPSendRobust(void *arg)
         if(tcpavail>0)
         {
             printf ("TCPEnviado\n");
+            //size_t messSize;
+            //uint8_t* codedData = encode_cbor(rx_buffer,&messSize);
             int to_write = BUFFER_SIZE;
+            //int to_write = messSize;
 
             while (to_write > 0) {
                 int written = send(sock, &rx_buffer, to_write, 0);
+                //int written = send(sock, codedData, to_write, 0);
                 if (written < 0) {
                     ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
                     tcpavail = 0;
@@ -221,7 +230,13 @@ void handle_socket(void *pvParameters)
             }
             else if(rx2_buffer[0] == 'B')
             {
-                updatePosition(rx2_buffer[1],rx2_buffer[2],rx2_buffer[3]);
+                //updatePosition(rx2_buffer[1],rx2_buffer[2],rx2_buffer[3]);
+                configj1 = rx2_buffer[1];
+                if(configj1 > SERVO_MAX_DEGREE)configj1 = SERVO_MAX_DEGREE;
+                configj2 = rx2_buffer[2];
+                if(configj2 > SERVO_MAX_DEGREE)configj2 = SERVO_MAX_DEGREE;
+                configj3 = rx2_buffer[3];
+                if(configj3 > SERVO_MAX_DEGREE)configj3 = SERVO_MAX_DEGREE;
             }
         }
     }
@@ -351,7 +366,7 @@ void SPI_init_config(void)
         .sclk_io_num = SPI_CLK,
         .quadhd_io_num = -1,
         .quadwp_io_num = -1,
-        .max_transfer_sz = 4800,
+        .max_transfer_sz = 5120,
     };
 
     spi_slave_interface_config_t slavecfg =
@@ -418,95 +433,172 @@ static void mcpwm_initialize(void)
     mcpwm_init(MCPWM_UNIT_0, MCPWM_TIMER_2, &pwm_config);
 }
 
-// void set_servo_angle(uint32_t angle)
+static void updatePositionSCH(void *arg)
+{
+    while(1)
+    {
+        if(configj1 > SERVO_MAX_DEGREE)configj1 = SERVO_MAX_DEGREE;
+        if(configj2 > SERVO_MAX_DEGREE)configj2 = SERVO_MAX_DEGREE;
+        if(configj3 > SERVO_MAX_DEGREE)configj3 = SERVO_MAX_DEGREE;
+
+        step1 = brazo.joint1;
+        step2 = brazo.joint2;
+        step3 = brazo.gripper;
+
+        while((brazo.joint1 != configj1) | (brazo.joint2 != configj2) | (brazo.gripper != configj3))
+        {
+            brazo.joint1 = step1;
+            brazo.joint2 = step2;
+            brazo.gripper = step3;
+
+            if(step1>configj1)
+            {
+                brazo.duty_us1 = (SERVO_MIN_PULSEWIDTH + (((SERVO_MAX_PULSEWIDTH - SERVO_MIN_PULSEWIDTH) * step1) / SERVO_MAX_DEGREE));
+                mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, brazo.duty_us1);
+                step1--;
+                
+            }
+            else if(step1<configj1)
+            {
+                brazo.duty_us1 = (SERVO_MIN_PULSEWIDTH + (((SERVO_MAX_PULSEWIDTH - SERVO_MIN_PULSEWIDTH) * step1) / SERVO_MAX_DEGREE));
+                mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, brazo.duty_us1);
+                step1++; 
+                
+            }
+
+            if(step2>configj2)
+            {
+                brazo.duty_us2 = (SERVO_MIN_PULSEWIDTH + (((SERVO_MAX_PULSEWIDTH - SERVO_MIN_PULSEWIDTH) * step2) / SERVO_MAX_DEGREE));
+                mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_1, MCPWM_OPR_A, brazo.duty_us2);
+                step2--;
+                
+            }
+            else if(step2<configj2)
+            {
+                brazo.duty_us2 = (SERVO_MIN_PULSEWIDTH + (((SERVO_MAX_PULSEWIDTH - SERVO_MIN_PULSEWIDTH) * step2) / SERVO_MAX_DEGREE));
+                mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_1, MCPWM_OPR_A, brazo.duty_us2);
+                step2++; 
+                
+            }
+
+            if(step3>configj3)
+            {
+                brazo.duty_us3 = (SERVO_MIN_PULSEWIDTH + (((SERVO_MAX_PULSEWIDTH - SERVO_MIN_PULSEWIDTH) * step3) / SERVO_MAX_DEGREE));
+                mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_2, MCPWM_OPR_A, brazo.duty_us3);
+                step3--;
+                
+            }
+            else if(step3<configj3)
+            {
+                brazo.duty_us3 = (SERVO_MIN_PULSEWIDTH + (((SERVO_MAX_PULSEWIDTH - SERVO_MIN_PULSEWIDTH) * step3) / SERVO_MAX_DEGREE));
+                mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_2, MCPWM_OPR_A, brazo.duty_us3);
+                step3++; 
+                
+            }
+
+            vTaskDelay(20 / portTICK_PERIOD_MS);
+        }
+
+        vTaskDelay(5 / portTICK_PERIOD_MS);
+    }
+}
+
+// void updatePosition(uint32_t joint1, uint32_t joint2, uint32_t gripper)
 // {
-//     if (angle > SERVO_MAX_DEGREE)
+//     //Truncando los valores para evitar problemas
+//     if(joint1 > SERVO_MAX_DEGREE)joint1 = SERVO_MAX_DEGREE;
+//     //if(joint1 < 0)joint1 = 0;
+
+//     if(joint2 > SERVO_MAX_DEGREE)joint2 = SERVO_MAX_DEGREE;
+//     //if(joint2 < 0)joint2 = 0;
+
+//     if(gripper > SERVO_MAX_DEGREE)gripper = SERVO_MAX_DEGREE;
+//     //if(gripper < 0)gripper = 0;
+
+//     uint32_t step1,step2,step3;
+//     step1 = brazo.joint1;
+//     step2 = brazo.joint2;
+//     step3 = brazo.gripper;
+
+//     while((brazo.joint1 != joint1) | (brazo.joint2 != joint2) | (brazo.gripper != gripper))
 //     {
-//         angle = SERVO_MAX_DEGREE; //En caso de error, limita el angulo
+//         brazo.joint1 = step1;
+//         brazo.joint2 = step2;
+//         brazo.gripper = step3;
+
+//         if(step1>joint1)
+//         {
+//             brazo.duty_us1 = (SERVO_MIN_PULSEWIDTH + (((SERVO_MAX_PULSEWIDTH - SERVO_MIN_PULSEWIDTH) * step1) / SERVO_MAX_DEGREE));
+//             mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, brazo.duty_us1);
+//             step1--;
+            
+//         }
+//         else if(step1<joint1)
+//         {
+//             brazo.duty_us1 = (SERVO_MIN_PULSEWIDTH + (((SERVO_MAX_PULSEWIDTH - SERVO_MIN_PULSEWIDTH) * step1) / SERVO_MAX_DEGREE));
+//             mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, brazo.duty_us1);
+//             step1++; 
+            
+//         }
+
+//         if(step2>joint2)
+//         {
+//             brazo.duty_us2 = (SERVO_MIN_PULSEWIDTH + (((SERVO_MAX_PULSEWIDTH - SERVO_MIN_PULSEWIDTH) * step2) / SERVO_MAX_DEGREE));
+//             mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_1, MCPWM_OPR_A, brazo.duty_us2);
+//             step2--;
+            
+//         }
+//         else if(step2<joint2)
+//         {
+//             brazo.duty_us2 = (SERVO_MIN_PULSEWIDTH + (((SERVO_MAX_PULSEWIDTH - SERVO_MIN_PULSEWIDTH) * step2) / SERVO_MAX_DEGREE));
+//             mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_1, MCPWM_OPR_A, brazo.duty_us2);
+//             step2++; 
+            
+//         }
+
+//         if(step3>gripper)
+//         {
+//             brazo.duty_us3 = (SERVO_MIN_PULSEWIDTH + (((SERVO_MAX_PULSEWIDTH - SERVO_MIN_PULSEWIDTH) * step3) / SERVO_MAX_DEGREE));
+//             mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_2, MCPWM_OPR_A, brazo.duty_us3);
+//             step3--;
+            
+//         }
+//         else if(step3<gripper)
+//         {
+//             brazo.duty_us3 = (SERVO_MIN_PULSEWIDTH + (((SERVO_MAX_PULSEWIDTH - SERVO_MIN_PULSEWIDTH) * step3) / SERVO_MAX_DEGREE));
+//             mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_2, MCPWM_OPR_A, brazo.duty_us3);
+//             step3++; 
+            
+//         }
+
+//         vTaskDelay(25 / portTICK_PERIOD_MS);
 //     }
-//     servo1.angle = angle;
-//     servo1.duty_us = (SERVO_MIN_PULSEWIDTH + (((SERVO_MAX_PULSEWIDTH - SERVO_MIN_PULSEWIDTH) * angle) / SERVO_MAX_DEGREE));
-//     mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, servo1.duty_us);
+
 // }
 
-void updatePosition(uint32_t joint1, uint32_t joint2, uint32_t gripper)
+uint8_t* encode_cbor(const char* data, size_t* mesSize)
 {
-    //Truncando los valores para evitar problemas
-    if(joint1 > SERVO_MAX_DEGREE)joint1 = SERVO_MAX_DEGREE;
-    //if(joint1 < 0)joint1 = 0;
+    uint8_t* CBORBuffer = (uint8_t*)malloc(BUFFER_SIZE+10);
 
-    if(joint2 > SERVO_MAX_DEGREE)joint2 = SERVO_MAX_DEGREE;
-    //if(joint2 < 0)joint2 = 0;
+    CborEncoder encoder;
 
-    if(gripper > SERVO_MAX_DEGREE)gripper = SERVO_MAX_DEGREE;
-    //if(gripper < 0)gripper = 0;
+    cbor_encoder_init(&encoder,CBORBuffer,(BUFFER_SIZE+10),0);
 
-    uint32_t step1,step2,step3;
-    step1 = brazo.joint1;
-    step2 = brazo.joint2;
-    step3 = brazo.gripper;
+    cbor_encode_byte_string(&encoder, (const uint8_t*)data,(BUFFER_SIZE+10));
 
-    while((brazo.joint1 != joint1) | (brazo.joint2 != joint2) | (brazo.gripper != gripper))
-    {
-        brazo.joint1 = step1;
-        brazo.joint2 = step2;
-        brazo.gripper = step3;
+    *mesSize = cbor_encoder_get_buffer_size(&encoder,CBORBuffer);
 
-        if(step1>joint1)
-        {
-            brazo.duty_us1 = (SERVO_MIN_PULSEWIDTH + (((SERVO_MAX_PULSEWIDTH - SERVO_MIN_PULSEWIDTH) * step1) / SERVO_MAX_DEGREE));
-            mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, brazo.duty_us1);
-            step1--;
-            
-        }
-        else if(step1<joint1)
-        {
-            brazo.duty_us1 = (SERVO_MIN_PULSEWIDTH + (((SERVO_MAX_PULSEWIDTH - SERVO_MIN_PULSEWIDTH) * step1) / SERVO_MAX_DEGREE));
-            mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_0, MCPWM_OPR_A, brazo.duty_us1);
-            step1++; 
-            
-        }
-
-        if(step2>joint2)
-        {
-            brazo.duty_us2 = (SERVO_MIN_PULSEWIDTH + (((SERVO_MAX_PULSEWIDTH - SERVO_MIN_PULSEWIDTH) * step2) / SERVO_MAX_DEGREE));
-            mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_1, MCPWM_OPR_A, brazo.duty_us2);
-            step2--;
-            
-        }
-        else if(step2<joint2)
-        {
-            brazo.duty_us2 = (SERVO_MIN_PULSEWIDTH + (((SERVO_MAX_PULSEWIDTH - SERVO_MIN_PULSEWIDTH) * step2) / SERVO_MAX_DEGREE));
-            mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_1, MCPWM_OPR_A, brazo.duty_us2);
-            step2++; 
-            
-        }
-
-        if(step3>gripper)
-        {
-            brazo.duty_us3 = (SERVO_MIN_PULSEWIDTH + (((SERVO_MAX_PULSEWIDTH - SERVO_MIN_PULSEWIDTH) * step3) / SERVO_MAX_DEGREE));
-            mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_2, MCPWM_OPR_A, brazo.duty_us3);
-            step3--;
-            
-        }
-        else if(step3<gripper)
-        {
-            brazo.duty_us3 = (SERVO_MIN_PULSEWIDTH + (((SERVO_MAX_PULSEWIDTH - SERVO_MIN_PULSEWIDTH) * step3) / SERVO_MAX_DEGREE));
-            mcpwm_set_duty_in_us(MCPWM_UNIT_0, MCPWM_TIMER_2, MCPWM_OPR_A, brazo.duty_us3);
-            step3++; 
-            
-        }
-
-        vTaskDelay(50 / portTICK_PERIOD_MS);
-    }
-
+    return CBORBuffer;
 }
 
 void app_main(void)
 {   
+    //Configurando el MCPWM para manejar los servos y colocandolos en 0
     mcpwm_initialize();
-    //set_servo_angle(0); //Colocarlo en 0
-    updatePosition(0,0,0);
+    //updatePosition(0,0,0);
+    configj1 = 0;
+    configj2 = 0;
+    configj3 = 0;
     vTaskDelay(1000 / portTICK_PERIOD_MS);
     
     //Configurando el SPI
@@ -519,5 +611,6 @@ void app_main(void)
     xTaskCreate(tcp_socket_init,"TCPSocket",4096,NULL,configMAX_PRIORITIES-3,NULL);
     xTaskCreate(AskForPicture,"SPIRetrieve",4096,NULL,configMAX_PRIORITIES-1,NULL);
     xTaskCreate(TCPSendRobust,"TCPSend",4096,NULL,configMAX_PRIORITIES-1,NULL);
+    xTaskCreate(updatePositionSCH,"MOVServo",1024,NULL,configMAX_PRIORITIES-2,NULL);
     
 }
