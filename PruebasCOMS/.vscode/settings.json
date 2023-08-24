@@ -1,5 +1,6 @@
 {
     "files.associations": {
-        "cbor.h": "c"
+        "cbor.h": "c",
+        "math.h": "c"
     }
 }
