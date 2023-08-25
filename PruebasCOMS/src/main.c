@@ -105,7 +105,7 @@ typedef struct {
     uint32_t duty_us3;
 }   ManSer;
 
-ManSer brazo = {5,5,5,0,0,0};
+ManSer brazo = {60,60,100,0,0,0};
 
 uint32_t configj1,configj2,configj3;
 uint32_t step1,step2,step3;
@@ -241,11 +241,13 @@ void handle_socket(void *pvParameters)
             else if(rx2_buffer[0] == 'B') //Configurar los servos
             {
                 configj1 = rx2_buffer[1];
-                if(configj1 > SERVO_MAX_DEGREE)configj1 = SERVO_MAX_DEGREE;
+                if(configj1 > 110)configj1 = 110;
                 configj2 = rx2_buffer[2];
-                if(configj2 > SERVO_MAX_DEGREE)configj2 = SERVO_MAX_DEGREE;
+                if(configj2 < 45)configj2 = 45;
+                else if(configj2 > SERVO_MAX_DEGREE)configj2 = SERVO_MAX_DEGREE;
                 configj3 = rx2_buffer[3];
-                if(configj3 > SERVO_MAX_DEGREE)configj3 = SERVO_MAX_DEGREE;
+                if(configj3 < 40)configj3 = 40;
+                else if(configj3 > SERVO_MAX_DEGREE)configj3 = SERVO_MAX_DEGREE;
             }
             else if(rx2_buffer[0]=='C')//Encender la camara, el brazo y el pololu
             {
@@ -258,7 +260,7 @@ void handle_socket(void *pvParameters)
             else if(rx2_buffer[0]=='E')//Recibir las coordenadas para modificar la configuracion del brazo
             {
                 coordX = rx2_buffer[1];
-                coordY = rx2_buffer[2]-15;//Offset para que el 0 este en el suelo
+                coordY = rx2_buffer[2];//Offset para que el 0 este en el suelo
                 updateCoords = 1;
             }
         }
@@ -447,22 +449,36 @@ static void mcpwm_initialize(void)
 
     mcpwm_config_t pwm_config;
     pwm_config.frequency = 50;                       // Set frequency in Hz (50Hz for most servos)
-    pwm_config.cmpr_a = 0;                           // Initial duty cycle in %, 0% for 0-degree position
+    pwm_config.cmpr_a = 2000;                           // Initial duty cycle
     pwm_config.counter_mode = MCPWM_UP_COUNTER;       // Up counter mode
     pwm_config.duty_mode = MCPWM_DUTY_MODE_0;         // Active high PWM duty mode
     
+    mcpwm_config_t pwm_config2;
+    pwm_config2.frequency = 50;                       // Set frequency in Hz (50Hz for most servos)
+    pwm_config2.cmpr_a = 2000;                           // Initial duty cycle
+    pwm_config2.counter_mode = MCPWM_UP_COUNTER;       // Up counter mode
+    pwm_config2.duty_mode = MCPWM_DUTY_MODE_0;         // Active high PWM duty mode
+
+    mcpwm_config_t pwm_config3;
+    pwm_config3.frequency = 50;                       // Set frequency in Hz (50Hz for most servos)
+    pwm_config3.cmpr_a = 2178;                           // Initial duty cycle
+    pwm_config3.counter_mode = MCPWM_UP_COUNTER;       // Up counter mode
+    pwm_config3.duty_mode = MCPWM_DUTY_MODE_0;         // Active high PWM duty mode
+
     mcpwm_init(MCPWM_UNIT_0, MCPWM_TIMER_0, &pwm_config);
-    mcpwm_init(MCPWM_UNIT_0, MCPWM_TIMER_1, &pwm_config);
-    mcpwm_init(MCPWM_UNIT_0, MCPWM_TIMER_2, &pwm_config);
+    mcpwm_init(MCPWM_UNIT_0, MCPWM_TIMER_1, &pwm_config2);
+    mcpwm_init(MCPWM_UNIT_0, MCPWM_TIMER_2, &pwm_config3);
 }
 
 static void updatePositionSCH(void *arg)
 {
     while(1)
     {
-        if(configj1 > SERVO_MAX_DEGREE)configj1 = SERVO_MAX_DEGREE;
+        if(configj1 > 110)configj1 = 110;
         if(configj2 > SERVO_MAX_DEGREE)configj2 = SERVO_MAX_DEGREE;
+        else if(configj2 < 45)configj2 = 45;
         if(configj3 > SERVO_MAX_DEGREE)configj3 = SERVO_MAX_DEGREE;
+        else if(configj3 < 40)configj3 = 40;
 
         step1 = brazo.joint1;
         step2 = brazo.joint2;
@@ -532,17 +548,19 @@ static void CalcConfig(void *arg)
     {
        if(updateCoords > 0)
        {
+        double Yadjust = (double)coordY;
 
-        double tempq2 = -acos(((double)(coordX*coordX)+(double)(coordY*coordY)-(double)(es1*es1)-(double)(es2*es2))/((double)(2*es1*es2)));
+        double tempq2 = -acos(((double)(coordX*coordX)+(double)(Yadjust*Yadjust)-(double)(es1*es1)-(double)(es2*es2))/((double)(2*es1*es2)));
         
-        double tempq1 = atan((double)coordY/(double)coordX) - atan(((double)es2*sin(tempq2))/((double)es1+(double)es2*cos(tempq2)));
+        double tempq1 = atan((double)Yadjust/(double)coordX) - atan(((double)es2*sin(tempq2))/((double)es1+(double)es2*cos(tempq2)));
 
         q1 = (uint32_t)round(tempq1*(180.0/M_PI));
         q2 = (uint32_t)round(tempq2*(180.0/M_PI) + 180.0);
 
-        if(q1 > 180) q1 = 180;
+        if(q1 > 110) q1 = 110;
         
         if(q2 > 180) q2 = 180;
+        else if(q2 < 45) q2 = 45;
 
         configj1 = q1;
         configj2 = q2;
@@ -583,8 +601,7 @@ void app_main(void)
     
     //Configurando el MCPWM para manejar los servos y colocandolos en 0
     mcpwm_initialize();
-    //updatePosition(0,0,0);
-    configj1 = 0;
+    configj1 = 90;
     configj2 = 90;
     configj3 = 160;
     vTaskDelay(1000 / portTICK_PERIOD_MS);
