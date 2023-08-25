@@ -258,7 +258,7 @@ void handle_socket(void *pvParameters)
             else if(rx2_buffer[0]=='E')//Recibir las coordenadas para modificar la configuracion del brazo
             {
                 coordX = rx2_buffer[1];
-                coordY = rx2_buffer[2];
+                coordY = rx2_buffer[2]-15;//Offset para que el 0 este en el suelo
                 updateCoords = 1;
             }
         }
@@ -533,21 +533,19 @@ static void CalcConfig(void *arg)
        if(updateCoords > 0)
        {
 
-        double tempq2 = -acos(((coordX^2)+(coordY^2)-(es1^2)-(es2^2))/(2*es1*es2));
+        double tempq2 = -acos(((double)(coordX*coordX)+(double)(coordY*coordY)-(double)(es1*es1)-(double)(es2*es2))/((double)(2*es1*es2)));
         
-        double tempq1 = atan(coordY/coordX) - atan((es2*sin(tempq2))/(es1+es2*cos(tempq2)));
+        double tempq1 = atan((double)coordY/(double)coordX) - atan(((double)es2*sin(tempq2))/((double)es1+(double)es2*cos(tempq2)));
 
-        double deg = 180.00;
-
-        q1 = (uint32_t)(tempq1*(deg/M_PI));
-        q2 = (uint32_t)(tempq2*(deg/M_PI));
+        q1 = (uint32_t)round(tempq1*(180.0/M_PI));
+        q2 = (uint32_t)round(tempq2*(180.0/M_PI) + 180.0);
 
         if(q1 > 180) q1 = 180;
         
         if(q2 > 180) q2 = 180;
 
         configj1 = q1;
-        configj2 = q2 - 90;
+        configj2 = q2;
 
         updateCoords = 0;
        }
