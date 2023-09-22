@@ -36,6 +36,10 @@
 #include "../src/cbor.h"
 //Operaciones trigonometrica
 #include <math.h>
+//Lectura con el ADC
+#include "esp_adc/adc_oneshot.h"
+#include "esp_adc/adc_cali.h"
+#include "esp_adc/adc_cali_scheme.h"
 
 //Parametros para la configuracion del servidor
 #define SSID                "Pololu3Pi+"
@@ -115,6 +119,10 @@ uint32_t es1 = 47; //Largo eslabon 1
 uint32_t es2 = 68; //Largo eslabon 2 
 uint8_t coordX,coordY;//Configuraciones en XY para colocar el brazo
 uint8_t updateCoords = 0;//Para actualizar la configuracion luego de enviar coordenadas
+
+//Variables para el ADC
+static int adc_raw[1][10];
+adc_oneshot_unit_handle_t adc1_handle;
 
 //Prototipos para algunas funciones
 static void AskForPicture(void *arg);
@@ -586,6 +594,65 @@ uint8_t* encode_cbor(const char* data, size_t* mesSize)
     return CBORBuffer;
 }
 
+static bool adc_calibration_init(adc_unit_t unit, adc_channel_t channel, adc_atten_t atten, adc_cali_handle_t *out_handle)
+{
+    adc_cali_handle_t handle = NULL;
+    esp_err_t ret = ESP_FAIL;
+    bool calibrated = false;
+
+    if (!calibrated) {
+        ESP_LOGI(TAG, "calibration scheme version is %s", "Curve Fitting");
+        adc_cali_curve_fitting_config_t cali_config = {
+            .unit_id = unit,
+            .atten = atten,
+            .bitwidth = ADC_BITWIDTH_DEFAULT,
+        };
+        ret = adc_cali_create_scheme_curve_fitting(&cali_config, &handle);
+        if (ret == ESP_OK) {
+            calibrated = true;
+        }
+    }
+
+    *out_handle = handle;
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "Calibration Success");
+    } else if (ret == ESP_ERR_NOT_SUPPORTED || !calibrated) {
+        ESP_LOGW(TAG, "eFuse not burnt, skip software calibration");
+    } else {
+        ESP_LOGE(TAG, "Invalid arg or no memory");
+    }
+
+    return calibrated;
+}
+
+void ADCConfig(void)
+{
+    adc_oneshot_unit_init_cfg_t init_config1 = {
+        .unit_id = ADC_UNIT_1,
+    };
+    ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config1, &adc1_handle));
+
+    adc_oneshot_chan_cfg_t config = {
+        .bitwidth = ADC_BITWIDTH_DEFAULT,
+        .atten = ADC_ATTEN_DB_11,
+    };
+    ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, ADC_CHANNEL_4, &config));
+
+    adc_cali_handle_t adc_cali_chan4_handle = NULL;
+    bool calibration_chan4 = adc_calibration_init(ADC_UNIT_1, ADC_CHANNEL_4, ADC_ATTEN_DB_0, &adc_cali_chan4_handle);
+
+}
+
+static void BatteryUpadte(void *arg)
+{
+    while(1)
+    {
+        ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, ADC_CHANNEL_4, &adc_raw[0][0]));
+        //ESP_LOGI(TAG, "ADC%d Channel[%d] Raw Data: %d", ADC_UNIT_1 + 1, ADC_CHANNEL_4, adc_raw[0][0]);
+        vTaskDelay(1000/ portTICK_PERIOD_MS); 
+    }
+}
+
 void app_main(void)
 {   
 
@@ -599,13 +666,16 @@ void app_main(void)
     gpio_config(&pololuPin);
     //gpio_set_level(POLOLUSWITCH, 0);
     
-    //Configurando el MCPWM para manejar los servos y colocandolos en 0
+    //Configurando el MCPWM para manejar los servos y colocandolos en reposo
     mcpwm_initialize();
     configj1 = 90;
     configj2 = 90;
     configj3 = 160;
     vTaskDelay(1000 / portTICK_PERIOD_MS);
     
+    //Configuracion del ADC
+    ADCConfig();
+
     //Configurando el SPI
     SPI_init_config();
     //Inicializando el NVS
@@ -618,4 +688,5 @@ void app_main(void)
     xTaskCreate(TCPSendRobust,"TCPSend",4096,NULL,configMAX_PRIORITIES-1,NULL);
     xTaskCreate(updatePositionSCH,"MOVServo",1024,NULL,configMAX_PRIORITIES-1,NULL);
     xTaskCreate(CalcConfig,"CalcPosition",1024,NULL,configMAX_PRIORITIES-4,NULL);
+    xTaskCreate(BatteryUpadte,"UpdateBateria",4096,NULL,configMAX_PRIORITIES-5,NULL);
 }
