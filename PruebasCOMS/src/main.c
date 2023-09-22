@@ -123,6 +123,7 @@ uint8_t updateCoords = 0;//Para actualizar la configuracion luego de enviar coor
 //Variables para el ADC
 static int adc_raw[1][10];
 adc_oneshot_unit_handle_t adc1_handle;
+int batlevel = 0;
 
 //Prototipos para algunas funciones
 static void AskForPicture(void *arg);
@@ -229,7 +230,7 @@ void handle_socket(void *pvParameters)
     while(1) 
     {
         int len;
-        char rx2_buffer[5];
+        char rx2_buffer[513];
         len = recv(client_socket, rx2_buffer, sizeof(rx2_buffer)-1, 0);
 
         if (len < 0) {
@@ -270,6 +271,21 @@ void handle_socket(void *pvParameters)
                 coordX = rx2_buffer[1];
                 coordY = rx2_buffer[2];//Offset para que el 0 este en el suelo
                 updateCoords = 1;
+            }
+            else if(rx2_buffer[0]=='F')
+            {
+                //Convertir el int a un arreglo de bytes para enviarlo.
+                batlevel = adc_raw[0][0];
+                uint8_t buffer[sizeof(int)];
+                memcpy(buffer, &batlevel, sizeof(int));
+
+                int bytes_sent = send(sock, buffer, sizeof(int), 0);
+
+                if (bytes_sent < 0) {
+                    ESP_LOGE(TAG, "Error al enviar datos");
+                } else {
+                    ESP_LOGI(TAG, "Enviados %d bytes", bytes_sent);
+                }
             }
         }
     }
