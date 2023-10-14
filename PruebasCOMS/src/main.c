@@ -1,3 +1,28 @@
+/**
+ * @file main.c
+ * @author José Luis Alvarez Pineda (19392)
+ * @date 13 Oct 2023
+ * @brief Script principal para configurar la placa TinyS3 a utilizar en los agentes 3Pi+
+ * de la plataforma de pruebas del Robotat UVG.
+ *
+ * En este script se configura el modulo WiFi, los modulos MCPWM, los pines de I/O,
+ * los pines analogicos, el bus SPI y las rutinas de control para aumentar las capacidades del agente
+ * 3Pi+.  
+ * Este script es compatible con el manipulador serial y la OpenMV Cam H7, controlandolos por 
+ * medio de instrucciones WiFi. Con este se puede controlar el manipulador serial al envair las 
+ * coordenadas para mover su efector final y enviando las configuraciones en bruto del manipulador,
+ * ademas de poder abrir el efector a distitos tamaños, los servomotores del manipulador son manejados 
+ * con los pines de MCPWM configurados. La OpenMV Cam H7 se conecta por medio de SPI con una tasa de 
+ * transferencia de 40Mbps full-duplex, lo que permite el envio de la imagen en blanco y negro 
+ * por medio de WiFi bajo demanda, lo que permite capturar la imagen en un momento dado o realizar un
+ * webstream que alcanza hasta 6 FPS en promedio. Por ultimo, este permite controlar las velocidades
+ * de los motores del agente por medio de WiFi, al enviar las velocidades de cada motor, y tambien 
+ * tiene la capacidad de encender o apagar todo los modulos con un solo comando.
+ * 
+ * @see https://github.com/JoseLuisA-P/Tesis-ESP32-Pololu.git
+ */
+
+
 //De cajon
 #include <stdio.h>
 #include <sys/fcntl.h>
@@ -100,13 +125,28 @@ static const char *TAG = "Prueba";
 #define SERVO_MAX_PULSEWIDTH 2400 // Maximum pulse width in microseconds
 #define SERVO_MAX_DEGREE 180      // Maximum angle in degrees
 
+/**
+ * \struct
+ * @brief Estuctura utilizada para conservar los parametros del manipulador serial.
+ *
+ * En esta estructura se incluyen los valores de configuracion de las juntas y su 
+ * ciclo de trabajo.  Los valores de las juntas es el angulo que deben de mantener
+ * acorde a la ultima configuracion realizada, con este valor se realizan los pasos 
+ * para calcular el nuevo ciclo de trabajo y asi colocar la junta en esa configuracion,
+ * ademas de utilizarse como el ultimo valor configurado.
+ * El valor del ciclo de trabajo se utiliza para mantener la posicion luego de 
+ * actualizar la configuracion de la junta y colocar el manipulador en su posicion
+ * luego de un reinicio.
+ * 
+ */
+
 typedef struct {
-    uint32_t joint1;
-    uint32_t joint2;
-    uint32_t gripper;
-    uint32_t duty_us1;
-    uint32_t duty_us2;
-    uint32_t duty_us3;
+    uint32_t joint1;    /**< Configuracion de la junta 1, en grados. */
+    uint32_t joint2;    /**< Configuracion de la junta 2, en grados. */
+    uint32_t gripper;   /**< Configuracion de la junta 3, en grados. */
+    uint32_t duty_us1;  /**< Ciclo de trabajo en la junta 1. */
+    uint32_t duty_us2;  /**< Ciclo de trabajo en la junta 2. */
+    uint32_t duty_us3;  /**< Ciclo de trabajo en la junta 3. */
 }   ManSer;
 
 ManSer brazo = {60,60,100,0,0,0};
@@ -130,6 +170,21 @@ static void AskForPicture(void *arg);
 static void SetAngle(int channel, uint32_t angle);
 uint8_t* encode_cbor(const char* data, size_t* mesSize);
 
+/*!
+ \fn static void wifi_event_handler(void* arg, esp_event_base_t event_base,int32_t event_id, void* event_data)
+ @brief Handler del modulo WiFi.
+
+ Despliega informacion sobre los eventos que ocurren luego de crear configurar el modulo WiFi y el Access Point,
+ desplegando la direccion MAC e IP de los clientes al conectarse o desconectarse.
+ 
+ \param event_base Define la variable utilizada para registrar el evento.
+ \param event_id En este se indica el id del evento a registrar o si se deben de registrar todos los eventos.
+ \param event_data Es la informacion de respuesta generada ante el evento registrado.
+ \return En el monitor serial el estado de la conexion. 
+ \note Este handler se utiliza en la funcion "esp__event_handler_instance_register", no debe de ser utilizado de
+ manera directa en el codigo. 
+*/
+
 static void wifi_event_handler(void* arg, esp_event_base_t event_base,int32_t event_id, void* event_data)
 {
     switch(event_id)
@@ -151,6 +206,19 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,int32_t ev
 
     }
 }
+
+/*!
+ \fn void wifi_init_softap(void)
+ @brief Inicializa y configura el modulo WiFi como Access Point (SoftAP)
+
+ Configura el modulo WiFi como un Access Point utilizando el nombre de red (SSID) y contraseña (WIFIPASSWORD),
+ este se configura utilizando el protocolo de seguridad WPA2-PSK, manteniendo a la red segura. Al finalizar
+ la configuracion despliega un mensaje con los parametros necesarios para la conexion a la red.
+ 
+ \note Solo se debe de llamar una vez y esto luego de haber inicializado la NVS
+ \see void nvs_init(void)
+
+*/
 
 void wifi_init_softap(void)
 {
@@ -184,6 +252,18 @@ void wifi_init_softap(void)
     ESP_LOGI(TAG, "wifi_init_softap finished. SSID:%s password:%s channel:%d",SSID, WIFIPASSWORD, WIFICHANNEL);
 }
 
+/*!
+ \fn void nvs_init(void)
+ @brief Inicializa el sistema de almacenamiento flash no volatil (NVS).
+
+ Inicializa el sistema de almacenamiento flash no volatil (NVS), verificando la cantidad de 
+ paginas libres en la flash y la ultima version utilizada para su configuracion. Si no hay suficientes
+ paginas libres o al momento de cargar el codigo hay una nueva version, borra la flash y la
+ configura para poder ser utilizada por otros modulos. Por ultimo, despliega en el monitor serial
+ los posibles errores que se presenten al configurarla.
+
+*/
+
 void nvs_init(void)
 {
     esp_err_t ret = nvs_flash_init();
@@ -195,6 +275,18 @@ void nvs_init(void)
     ESP_ERROR_CHECK(ret);  
 }
 
+/*!
+ \fn static void TCPSendRobust(void *arg)
+ @brief Envio de datos por medio del Socket TCP.
+
+ Envia un paquete de gran tamaño por medio del socket WiFi al ser activada una bandera, 
+ utilizando el tamaño del Buffer como referencia. Envia el paquete por porciones, 
+ utilizando el ancho de banda maximo cuando es posible. En caso de presentarse un 
+ error durante el envio lo despliega en el monito serial y al terminar el envio 
+ exitosamente se baja la bandera.
+
+*/
+
 static void TCPSendRobust(void *arg)
 {
     while(1)
@@ -202,10 +294,7 @@ static void TCPSendRobust(void *arg)
         if(tcpavail>0)
         {
             printf ("TCPEnviado\n");
-            //size_t messSize;
-            //uint8_t* codedData = encode_cbor(rx_buffer,&messSize);
             int to_write = BUFFER_SIZE;
-            //int to_write = messSize;
 
             while (to_write > 0) {
                 int written = send(sock, &rx_buffer, to_write, 0);
@@ -222,6 +311,22 @@ static void TCPSendRobust(void *arg)
         vTaskDelay(10/ portTICK_PERIOD_MS);
     }
 }
+
+/*!
+ \fn void handle_socket(void *pvParameters)
+ @brief Handler para el manejo de los datos recibidos por WiFi.
+
+ Utilizando el Socket creado para la conexion con el cliente, recibe un paquete de
+ 512 bytes utilizado en el handler. Con este paquete, toma la informacion del primer
+ byte para determinar el tipo de tarea a realizar y como procesar el resto de bytes,
+ ademas de cuales banderas activar para el proceso. En caso de recibir un paquete para 
+ terminar la conexion, cierra el cliente y elimina la tarea creada.
+
+ \param pvParameters Socket creado para la conexion con el cliente.
+
+ \note Esta se utiliza como una tarea creada luego de terminar de configurar el Socket,
+        para evitar errores de ejecucion.
+*/
 
 void handle_socket(void *pvParameters)
 {
