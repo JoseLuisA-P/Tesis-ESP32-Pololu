@@ -125,6 +125,25 @@ static const char *TAG = "Prueba";
 #define SERVO_MAX_PULSEWIDTH 2400 // Maximum pulse width in microseconds
 #define SERVO_MAX_DEGREE 180      // Maximum angle in degrees
 
+//Configuracion del CBOR 
+#define CBOR_BUF_SIZE       (32)
+#define CBOR_MSG_MIN_SIZE   (16)
+
+uint8_t cbor_buf_tx[CBOR_BUF_SIZE] = {0};
+CborEncoder encoder, array_encoder;
+CborParser parser;
+CborValue it, arr;
+volatile float phi_ell = -100;//-50;  // in rpm
+volatile float phi_r = 100;//50;     // in rpm
+
+//Configuracion del UART
+#define RX_BUF_SIZE         (1024)
+#define UART_PORT           UART_NUM_2
+#define TXD_PIN             (GPIO_NUM_7)
+#define RXD_PIN             (GPIO_NUM_8)
+
+static const unsigned int control_time_ms = 100;
+
 /**
  * \struct
  * @brief Estuctura utilizada para conservar los parametros del manipulador serial.
@@ -169,6 +188,55 @@ int batlevel = 0;
 static void AskForPicture(void *arg);
 static void SetAngle(int channel, uint32_t angle);
 uint8_t* encode_cbor(const char* data, size_t* mesSize);
+
+/*!
+ \fn size_t cbor_encode_wheel_speeds(void)
+ @brief Codifica las velocidades de la rueda en formato CBOR en un buffer.
+
+ Inicializa el codificador CBOR con el buffer especificado y su tamaño, luego, se crea
+ un array de CBOR con las velocidades de cada motor como un puntu flotante. Por ultimo, 
+ se ciera el contenedor del array y se devuelve el tamaño del buffer para ser enviado.
+
+*/
+
+size_t cbor_encode_wheel_speeds(void)
+{
+    cbor_encoder_init(&encoder, cbor_buf_tx, sizeof(cbor_buf_tx), 0);
+    cbor_encoder_create_array(&encoder, &array_encoder, 2);
+    cbor_encode_float(&array_encoder, phi_ell);
+    cbor_encode_float(&array_encoder, phi_r);
+    cbor_encoder_close_container(&encoder, &array_encoder);
+
+    return cbor_encoder_get_buffer_size(&encoder, cbor_buf_tx);
+}
+
+/*!
+ \fn void UART_init(void)
+ @brief Configura la interfaz UART.
+
+ Configura los parametros del UART como la velocidad de transmision, tamaño del mensaje,
+ paridad, bits de parada y el control de flujo entre transacciones. Se asignan los pines
+ de TX y RX y se instala el controlador, inicializandolo para que opere en transacciones.
+ 
+ \note El buffer de TX puede o no ser configurado, esto dependera del tamaño del mensaje.
+
+*/
+
+void UART_init(void)
+{
+    const uart_config_t uart_config = {
+        .baud_rate = 115200,
+        .data_bits = UART_DATA_8_BITS,
+        .parity = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_SCLK_APB
+    };
+
+    uart_param_config(UART_PORT , &uart_config);
+    uart_set_pin(UART_PORT , TXD_PIN, RXD_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    uart_driver_install(UART_PORT , RX_BUF_SIZE, 0, 0, NULL, 0);
+}
 
 /*!
  \fn static void wifi_event_handler(void* arg, esp_event_base_t event_base,int32_t event_id, void* event_data)
@@ -398,6 +466,20 @@ void handle_socket(void *pvParameters)
     vTaskDelete(NULL);
 }
 
+/*!
+ \fn static void tcp_socket_init(void *arg)
+ @brief Funcion para crear el socket TCP y asignar el handler.
+
+ Inicializa el socket, colocandole una direccion y numero de puerto, manejando los errores en el proceso,
+ ademas, configura al puerto para permitir multiples reconexiones. Acepta las conexiones entrantes y 
+ las despliega en el monitor serial, con la direccion asignada y el puerto utilizado, tambien registra
+ los eventos por cada uno de los clientes. Y por ultimo crea la tarea para manejar los distintos 
+ que puede recibir al tener un cliente conectado.
+
+ \note Al crear la tarea, si se tienen problemas de conexion o manejo de mensajes, se puede aumentar
+    la prioridad de la tarea.
+*/
+
 static void tcp_socket_init(void *arg) 
 {
     int addr_family = AF_INET;
@@ -466,6 +548,8 @@ static void tcp_socket_init(void *arg)
 
 }
 
+
+/*
 void servo_ledc_config(void)
 {
     ledc_timer_config_t ledc_timer = {
@@ -490,25 +574,67 @@ void servo_ledc_config(void)
     ESP_ERROR_CHECK(ledc_channel_config(&servo_chanel1));
 
 }
-
+*/
+/*
 static void SetAngle(int channel, uint32_t angle)
 {
     dutyValue = minDuty + ((maxDuty-minDuty)/(maxDeg-minDeg))*(angle-minDeg);
     ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, channel, dutyValue));
     ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, channel));
 }
+*/
+
+/*!
+ \fn void my_post_cb(spi_slave_transaction_t *trans) 
+ @brief Funcion para finalizar el envio de datos por SPI.
+
+ Callback activado al terminar la transaccion por SPI, colocando en nivel bajo el
+ pin para el handshake, lo que indica a la OpenMV Cam H7 el fin de la comunicacion.
+
+ \param trans recibe el callback que indica cuando realizar la accion.
+*/
 
 void my_post_cb(spi_slave_transaction_t *trans) 
 {
-    //Utilizado para activar el pin despues de la transaccion
     gpio_set_level(SPI_HAND, 0);
 }
 
+/*!
+ \fn void my_pre_cb(spi_slave_transaction_t *trans) 
+ @brief Funcion para comenzar el envio de datos por SPI.
+
+ Callback activado al iniciar la transaccion por SPI, colocando en nivel alto el
+ pin para el handshake, indicandole a la OpenMV Cam H7 el inicio de la comunicacion y 
+ que se esta listo para recibir la informacion cuando este disponible.
+
+ \param trans recibe el callback que indica cuando realizar la accion.
+*/
+
 void my_pre_cb(spi_slave_transaction_t *trans) 
 {
-    //Utilizado para apagar el pin antes de la transaccion
     gpio_set_level(SPI_HAND, 1);
 }
+
+/*!
+ \fn void SPI_init_config(void)
+ @brief Configura el modulo SPI, inicializa el handshake y configura el pin para el handshake.
+
+ Inicializa la configuracion del bus SPI, asignando los pines para MISO, MOSI, CLK y el tamaño
+ maximo de datos a transmitir por transaccion. Configura el bus como esclavo, asignando el pin de CS, 
+ el tamaño de la cola y los callbacks al detectar una transmision. Al configurar el bus, lo inicializa
+ y activa el DMA en la transaccion. Por ultimo, configura el pin de handshake como salida y establece
+ el nivel logico de espera.
+
+ \param SPI_MISO pin de MISO.
+ \param SPI_MOSI pin de MOSI.
+ \param SPI_CLK pin de CLK.
+ \param SPI_CS pin de CS.
+ \param SPI_HAND pin para realizar el handshake.
+
+ \note El tamaño maximo de mensaje por transaccion debe de ser mayor al numero de datos que se espera recibir.
+        El pin de handshake y CS puede ser cualquier pin fisico, los pines de MOSI, MISO y CLK si deben de
+        coincidir con los presentados en la disposiicon de pines para el TinyS3.
+*/
 
 void SPI_init_config(void)
 {
@@ -547,6 +673,21 @@ void SPI_init_config(void)
 
 }
 
+/*!
+ \fn static void AskForPicture(void *arg)
+ @brief Bucle que solicita y recibe la imagen a traves del bus SPI.
+
+ Inicia bajo demanda la transmision de datos por el bus SPI, ante la bandera SPIAsk. En el inicio de cada
+ transaccion configura el bus de recepcion y la estuctura de transaccion, para recibir el dato, luego 
+ establece la longitud de la transaccion en bits e inicia la transmision. Al terminar la transaccion, se
+ activa la bandera para el envio de datos por TCP, indicando que hay datos disponibles y baja la bandera de
+ SPIAsk, ya que se cumplio con la solicitud de imagen.
+
+ \note se utiliza spi_slave_transmit, ya que este inicia la transaccion y es capaz de determinar la cantidad
+ de datos recibidos, si son necesarios. Al no configurar el buffer de TX, solo se esperan los datos.
+
+*/
+
 static void AskForPicture(void *arg)
 {   
     while(1){
@@ -569,6 +710,20 @@ static void AskForPicture(void *arg)
     vTaskDelay(10/ portTICK_PERIOD_MS);
     }
 }
+
+/*!
+ \fn static void mcpwm_initialize(void)
+ @brief Configura los 3 canales de PWM utilizados para el manipulador serial.
+
+ Inicializa los pines GPIO para los canales PWM, utilizando mcpwm_gpio_init. Luego, configura los parametros
+ de PWM como la frecuencia en Hz de operacion, el ciclo de trabajo inicial y el modo de reloj para su 
+ operacion. Se inicializan los temporizadores 0, 1 y 2 del modulo MCPWM y se configuran con los parametros
+ indicados.
+
+ \note Se recomeinda dejar un retraso de 1 segundo luego de llamar esta funcion, esto evita que los
+ servomotores se muevan de manera abrupta en el inicio de la configuracion.
+
+*/
 
 static void mcpwm_initialize(void)
 {
@@ -598,6 +753,21 @@ static void mcpwm_initialize(void)
     mcpwm_init(MCPWM_UNIT_0, MCPWM_TIMER_1, &pwm_config2);
     mcpwm_init(MCPWM_UNIT_0, MCPWM_TIMER_2, &pwm_config3);
 }
+
+/*!
+ \fn static void updatePositionSCH(void *arg)
+ @brief Controla la actualizacion y el ajuste continuo de las posiciones de los servomotores.
+
+ Limita los valores de configuracion de cada junta, para evitar colisiones fisicas. Luego, inicializa
+ las variables de paso para cada uno de los servomotores con su valor actual y los ajusta gradualmente
+ hasta coincidir con la nueva configuracion, en paralelo ajusta los ciclos de trabajo para que mover 
+ fisicamente el brazo. Este ajusta se realiza por pasos y los haces a pequeños intervalos, lo que 
+ asegura un movimiento suave en las juntas.
+
+ \note Luego de inicializar el MCPWM, se debe de asignar la configuracion de reposo a las juntas 
+ por codigo, para que se actualice la posicion de manera suave.
+
+*/
 
 static void updatePositionSCH(void *arg)
 {
@@ -671,6 +841,17 @@ static void updatePositionSCH(void *arg)
     }
 }
 
+/*!
+ \fn static void CalcConfig(void *arg)
+ @brief Calcula la configuracion XY del manipulador serial.
+
+ Calcula las posiciones angulares optimas para los servomotores del manipulador serial, utilizando
+ trigonometria y las coordenadas deseadas para mover el efector final. Luego, ajusta los valores 
+ calculados para que no pasen los limites establecidos y coloca estos valores calculados como los 
+ nuevos valores deseados, para que sean actualizados.
+
+*/
+
 static void CalcConfig(void *arg)
 {
     while(1)
@@ -700,6 +881,7 @@ static void CalcConfig(void *arg)
     }
 }
 
+/*
 uint8_t* encode_cbor(const char* data, size_t* mesSize)
 {
     uint8_t* CBORBuffer = (uint8_t*)malloc(BUFFER_SIZE+10);
@@ -714,7 +896,9 @@ uint8_t* encode_cbor(const char* data, size_t* mesSize)
 
     return CBORBuffer;
 }
+*/
 
+/*
 static bool adc_calibration_init(adc_unit_t unit, adc_channel_t channel, adc_atten_t atten, adc_cali_handle_t *out_handle)
 {
     adc_cali_handle_t handle = NULL;
@@ -745,6 +929,19 @@ static bool adc_calibration_init(adc_unit_t unit, adc_channel_t channel, adc_att
 
     return calibrated;
 }
+*/
+
+/*!
+ \fn void ADCConfig(void)
+ @brief Configura e inicializa un canal ADC.
+
+ Inicializa una nueva unidad ADC usando la configuracion de un solo disparo. Luego, configura el 
+ canal ADC especificado con un ancho de bits predeterminado y un atenuador de 11 dB, para leer 
+ un rango entre 0 a 3V. Por ultimo, se calibra el ADC para las medidas.
+
+ \note Se puede modificar la atenuacion dependiendo del nivel analogico a leer.
+
+*/
 
 void ADCConfig(void)
 {
@@ -759,10 +956,19 @@ void ADCConfig(void)
     };
     ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, ADC_CHANNEL_4, &config));
 
-    adc_cali_handle_t adc_cali_chan4_handle = NULL;
-    bool calibration_chan4 = adc_calibration_init(ADC_UNIT_1, ADC_CHANNEL_4, ADC_ATTEN_DB_0, &adc_cali_chan4_handle);
+    //adc_cali_handle_t adc_cali_chan4_handle = NULL;
+    //bool calibration_chan4 = adc_calibration_init(ADC_UNIT_1, ADC_CHANNEL_4, ADC_ATTEN_DB_0, &adc_cali_chan4_handle);
 
 }
+
+/*!
+ \fn static void BatteryUpadte(void *arg)
+ @brief Realiza lecturas periodicas del nivel de bateria utilizando el ADC.
+
+ Realiza una lectura del canal ADC cada segundo, obteniendo los valores en bruto del
+ nivel de bateria.
+
+*/
 
 static void BatteryUpadte(void *arg)
 {
@@ -774,8 +980,45 @@ static void BatteryUpadte(void *arg)
     }
 }
 
+/*!
+ \fn static void uart_tx_task(void * p_params)
+ @brief Transmite periodicamente datos a traves del UART.
+
+ Configura el tiempo de control y establece la frecuencia de tranmsision para el UART,
+ luego se rastrea el tiempo para garantizar de manera regular el envio de datos. En cada
+ ciclo se codifica las velocidades de la rueda con CBOR y luego se envia por medio de UART
+ al terminar la codificacion.
+
+ \note Los datos pueden ser codificados con CBOR o se puede utilizar para enviar
+ otra estructura de datos.
+
+*/
+
+static void uart_tx_task(void * p_params)
+{
+    TickType_t last_control_time;
+    const TickType_t control_freq_ticks = pdMS_TO_TICKS(control_time_ms);
+    size_t numbytes;
+
+    // Initialise the xLastWakeTime variable with the current time
+    last_control_time = xTaskGetTickCount();
+
+    while(1)
+    {
+        // Wait for the next cycle
+        vTaskDelayUntil(&last_control_time, control_freq_ticks);
+        numbytes = cbor_encode_wheel_speeds();
+        uart_write_bytes(UART_PORT , cbor_buf_tx, numbytes);
+        // char* test_str = "PruebaPrueba.\n";
+        // uart_write_bytes(UART_PORT, (const char*)test_str, strlen(test_str));        
+    }
+}
+
 void app_main(void)
 {   
+
+    //Inicializando el UART
+    UART_init();
 
     //Configurando el pin para encender el Pololu3pi+
     gpio_config_t pololuPin={
@@ -785,14 +1028,13 @@ void app_main(void)
     };
 
     gpio_config(&pololuPin);
-    //gpio_set_level(POLOLUSWITCH, 0);
     
     //Configurando el MCPWM para manejar los servos y colocandolos en reposo
     mcpwm_initialize();
     configj1 = 90;
     configj2 = 90;
     configj3 = 160;
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
+    vTaskDelay(1000 / portTICK_PERIOD_MS); //Seguridad, evita que los servomotores salten.
     
     //Configuracion del ADC
     ADCConfig();
@@ -803,7 +1045,8 @@ void app_main(void)
     nvs_init();
     //Inicializando el WIFI
     wifi_init_softap();
-    
+
+    xTaskCreate(uart_tx_task, "uart_tx_task", 4096, NULL, configMAX_PRIORITIES, NULL);
     xTaskCreate(tcp_socket_init,"TCPSocket",4096,NULL,configMAX_PRIORITIES-3,NULL);
     xTaskCreate(AskForPicture,"SPIRetrieve",4096,NULL,configMAX_PRIORITIES-2,NULL);
     xTaskCreate(TCPSendRobust,"TCPSend",4096,NULL,configMAX_PRIORITIES-1,NULL);
