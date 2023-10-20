@@ -133,8 +133,8 @@ uint8_t cbor_buf_tx[CBOR_BUF_SIZE] = {0};
 CborEncoder encoder, array_encoder;
 CborParser parser;
 CborValue it, arr;
-volatile float phi_ell = -100;//-50;  // in rpm
-volatile float phi_r = 100;//50;     // in rpm
+volatile float phi_ell = 0;//-50;  // in rpm
+volatile float phi_r = 0;//50;     // in rpm
 
 //Configuracion del UART
 #define RX_BUF_SIZE         (1024)
@@ -186,8 +186,6 @@ int batlevel = 0;
 
 //Prototipos para algunas funciones
 static void AskForPicture(void *arg);
-static void SetAngle(int channel, uint32_t angle);
-uint8_t* encode_cbor(const char* data, size_t* mesSize);
 
 /*!
  \fn size_t cbor_encode_wheel_speeds(void)
@@ -460,6 +458,20 @@ void handle_socket(void *pvParameters)
                     ESP_LOGI(TAG, "Enviados %d bytes", bytes_sent);
                 }
             }
+            else if(rx2_buffer[0] == 'G')
+            {
+                uint32_t concatR = 0;
+                uint32_t concatL = 0;
+
+                for(int a=0; a<sizeof(float); a++)
+                {
+                    concatL |= (uint32_t)rx2_buffer[a+1]<<(a*8);
+                    concatR |=  (uint32_t)rx2_buffer[a+5]<<(a*8);
+                }
+
+                memcpy(&phi_ell, &concatL, sizeof(float));
+                memcpy(&phi_r, &concatR, sizeof(float));
+            }
         }
     }
     close(client_socket);
@@ -540,12 +552,83 @@ static void tcp_socket_init(void *arg)
         {   
             inet_ntoa_r(((struct sockaddr_in *)&source_addr)->sin_addr.s_addr, addr_str, sizeof(addr_str) - 1);
             ESP_LOGI(TAG, "Socket accepted ip address: %s", addr_str);
-            xTaskCreate(handle_socket,"Connection",4096,(void *)sock,5,NULL);
+            xTaskCreate(handle_socket,"Connection",4096,(void *)sock,configMAX_PRIORITIES-5,NULL);
             vTaskDelay(10/ portTICK_PERIOD_MS);
         }
         
     }
 
+}
+
+static void tcp_socket_init2(void *arg) {
+    int LisSock = -1; // Asegúrate de inicializar LisSock
+    int sock = -1; // Asegúrate de inicializar sock
+
+    int addr_family = AF_INET;
+    int ip_protocol = 0;
+    struct sockaddr_in6 dest_addr;
+
+    struct sockaddr_in *dest_addr_ip4 = (struct sockaddr_in *)&dest_addr;
+    dest_addr_ip4->sin_addr.s_addr = htonl(INADDR_ANY);
+    dest_addr_ip4->sin_family = AF_INET;
+    dest_addr_ip4->sin_port = htons(PORT);
+    ip_protocol = IPPROTO_IP;
+
+    if (!LisSock) {
+        LisSock = socket(addr_family, SOCK_STREAM, ip_protocol);
+
+        if (LisSock < 0) {
+            ESP_LOGE(TAG, "Unable to create socket: errno %d", errno);
+            return;
+        }
+        int opt = 1;
+        setsockopt(LisSock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+        int flags = fcntl(LisSock, F_GETFL, 0);
+        fcntl(LisSock, F_SETFL, flags | O_NONBLOCK); // Configurando el socket en modo no bloqueante
+
+        ESP_LOGI(TAG, "Socket created");
+    }
+
+    int err = bind(LisSock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+    if (err != 0) {
+        ESP_LOGE(TAG, "Socket unable to bind: errno %d", errno);
+        ESP_LOGE(TAG, "IPPROTO: %d", addr_family);
+        close(LisSock);
+    }
+    ESP_LOGI(TAG, "Socket bound, port %d", PORT);
+
+    err = listen(LisSock, 1);
+
+    if (err != 0) {
+        ESP_LOGE(TAG, "Error occurred during listen: errno %d", errno);
+        close(LisSock);
+    }
+
+    ESP_LOGI(TAG, "Socket Listening");
+
+    while (1) {
+        char addr_str[128];
+        struct sockaddr_in source_addr;
+        uint addr_len = sizeof(source_addr);
+
+        sock = accept(LisSock, (struct sockaddr *)&source_addr, &addr_len);
+
+        if (sock < 0) {
+            if (errno == EWOULDBLOCK || errno == EAGAIN) {
+                vTaskDelay(100 / portTICK_PERIOD_MS); // Ajusta el tiempo de espera según tus necesidades
+                continue;
+            } else {
+                //ESP_LOGE(TAG, "Unable to accept connection: errno %d", errno);
+                vTaskDelay(100 / portTICK_PERIOD_MS);
+            }
+        } else {
+            inet_ntoa_r(((struct sockaddr_in *)&source_addr)->sin_addr.s_addr, addr_str, sizeof(addr_str) - 1);
+            ESP_LOGI(TAG, "Socket accepted ip address: %s", addr_str);
+            xTaskCreate(handle_socket, "Connection", 4096, (void *)sock, configMAX_PRIORITIES - 5, NULL);
+            vTaskDelay(10 / portTICK_PERIOD_MS);
+        }
+    }
 }
 
 
@@ -1009,8 +1092,8 @@ static void uart_tx_task(void * p_params)
         vTaskDelayUntil(&last_control_time, control_freq_ticks);
         numbytes = cbor_encode_wheel_speeds();
         uart_write_bytes(UART_PORT , cbor_buf_tx, numbytes);
-        // char* test_str = "PruebaPrueba.\n";
-        // uart_write_bytes(UART_PORT, (const char*)test_str, strlen(test_str));        
+        //char* test_str = "AA\n";
+        //uart_write_bytes(UART_PORT, (const char*)test_str, strlen(test_str));        
     }
 }
 
@@ -1046,11 +1129,11 @@ void app_main(void)
     //Inicializando el WIFI
     wifi_init_softap();
 
-    xTaskCreate(uart_tx_task, "uart_tx_task", 4096, NULL, configMAX_PRIORITIES, NULL);
-    xTaskCreate(tcp_socket_init,"TCPSocket",4096,NULL,configMAX_PRIORITIES-3,NULL);
+    xTaskCreate(tcp_socket_init,"TCPSocket",4096,NULL,configMAX_PRIORITIES-2,NULL);
     xTaskCreate(AskForPicture,"SPIRetrieve",4096,NULL,configMAX_PRIORITIES-2,NULL);
     xTaskCreate(TCPSendRobust,"TCPSend",4096,NULL,configMAX_PRIORITIES-1,NULL);
     xTaskCreate(updatePositionSCH,"MOVServo",1024,NULL,configMAX_PRIORITIES-1,NULL);
     xTaskCreate(CalcConfig,"CalcPosition",1024,NULL,configMAX_PRIORITIES-4,NULL);
     xTaskCreate(BatteryUpadte,"UpdateBateria",4096,NULL,configMAX_PRIORITIES-5,NULL);
+    xTaskCreate(uart_tx_task, "uart_tx_task", 4096, NULL, configMAX_PRIORITIES-5, NULL);
 }
