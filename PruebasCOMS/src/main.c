@@ -129,12 +129,36 @@ static const char *TAG = "Prueba";
 #define CBOR_BUF_SIZE       (32)
 #define CBOR_MSG_MIN_SIZE   (16)
 
+enum parser_fsm_state
+{
+    PARSER_START = 0,
+    PARSER_IS_INSIDE_ARRAY,
+    PARSER_GOT_X_POS,
+    PARSER_GOT_Y_POS,
+    PARSER_GOT_ANGLE
+} parser_state;
+
+uint8_t sendOdo = 0; //Para enviar la odometria al cliente
+char odo_buffer[BUFFER_SIZE];
+float xi_odo[3];  // Valores de [x,y,theta] del agente
 uint8_t cbor_buf_tx[CBOR_BUF_SIZE] = {0};
+uint8_t cbor_buf_rx[CBOR_BUF_SIZE] = {0};
+static const unsigned int odoread_time_ms = 100;
 CborEncoder encoder, array_encoder;
 CborParser parser;
 CborValue it, arr;
 volatile float phi_ell = 0;//-50;  // in rpm
 volatile float phi_r = 0;//50;     // in rpm
+
+union{
+    float input_flotante;
+    uint8_t bytes[4];
+} odoX, odoY, odoTheta; //Para convertir los floats en bytes y luego enviarlos al cliente
+
+//Segunda configuracion del CBOR
+float odo_x = 0;
+float odo_y = 0;
+float odo_theta = 0;
 
 //Configuracion del UART
 #define RX_BUF_SIZE         (1024)
@@ -180,9 +204,9 @@ uint8_t coordX,coordY;//Configuraciones en XY para colocar el brazo
 uint8_t updateCoords = 0;//Para actualizar la configuracion luego de enviar coordenadas
 
 //Variables para el ADC
-static int adc_raw[1][10];
-adc_oneshot_unit_handle_t adc1_handle;
-int batlevel = 0;
+static int adc_raw[1][10]; //Valores en bruto del ADC
+adc_oneshot_unit_handle_t adc1_handle; //Handler para las interrupciones
+int batlevel = 0; //Flag para cuando se lee el nivel de bateria
 
 //Prototipos para algunas funciones
 static void AskForPicture(void *arg);
@@ -231,9 +255,9 @@ void UART_init(void)
         .source_clk = UART_SCLK_APB
     };
 
-    uart_param_config(UART_PORT , &uart_config);
-    uart_set_pin(UART_PORT , TXD_PIN, RXD_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
     uart_driver_install(UART_PORT , RX_BUF_SIZE, 0, 0, NULL, 0);
+    uart_param_config(UART_PORT , &uart_config);
+    uart_set_pin(UART_PORT , TXD_PIN, RXD_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);   
 }
 
 /*!
@@ -361,10 +385,11 @@ static void TCPSendRobust(void *arg)
         {
             printf ("TCPEnviado\n");
             int to_write = BUFFER_SIZE;
+            int written = 0;
 
             while (to_write > 0) {
-                int written = send(sock, &rx_buffer, to_write, 0);
-                //int written = send(sock, codedData, to_write, 0);
+                    written = send(sock, &rx_buffer, to_write, 0);
+                    //int written = send(sock, codedData, to_write, 0);
                 if (written < 0) {
                     ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
                     tcpavail = 0;
@@ -440,7 +465,7 @@ void handle_socket(void *pvParameters)
             else if(rx2_buffer[0]=='E')//Recibir las coordenadas para modificar la configuracion del brazo
             {
                 coordX = rx2_buffer[1];
-                coordY = rx2_buffer[2];//Offset para que el 0 este en el suelo
+                coordY = rx2_buffer[2];
                 updateCoords = 1;
             }
             else if(rx2_buffer[0]=='F')
@@ -471,6 +496,30 @@ void handle_socket(void *pvParameters)
 
                 memcpy(&phi_ell, &concatL, sizeof(float));
                 memcpy(&phi_r, &concatR, sizeof(float));
+            }
+            
+            else if(rx2_buffer[0] == 'H')
+            {
+                uint8_t odoBuffer[sizeof(float)*3];
+                odoX.input_flotante = odo_x;
+                odoY.input_flotante = odo_y;
+                odoTheta.input_flotante = odo_theta;
+
+                for(int c=0; c<sizeof(float); c++)
+                {
+                    odoBuffer[c] = odoX.bytes[c];
+                    odoBuffer[c+4] = odoY.bytes[c];
+                    odoBuffer[c+8] = odoTheta.bytes[c];
+                }
+
+                int bytes_sent = send(sock, odoBuffer, sizeof(int)*3, 0);
+
+                if (bytes_sent < 0) {
+                    ESP_LOGE(TAG, "Error al enviar datos");
+                } else {
+                    ESP_LOGI(TAG, "Enviados %d bytes", bytes_sent);
+                }
+
             }
         }
     }
@@ -559,113 +608,6 @@ static void tcp_socket_init(void *arg)
     }
 
 }
-
-static void tcp_socket_init2(void *arg) {
-    int LisSock = -1; // Asegúrate de inicializar LisSock
-    int sock = -1; // Asegúrate de inicializar sock
-
-    int addr_family = AF_INET;
-    int ip_protocol = 0;
-    struct sockaddr_in6 dest_addr;
-
-    struct sockaddr_in *dest_addr_ip4 = (struct sockaddr_in *)&dest_addr;
-    dest_addr_ip4->sin_addr.s_addr = htonl(INADDR_ANY);
-    dest_addr_ip4->sin_family = AF_INET;
-    dest_addr_ip4->sin_port = htons(PORT);
-    ip_protocol = IPPROTO_IP;
-
-    if (!LisSock) {
-        LisSock = socket(addr_family, SOCK_STREAM, ip_protocol);
-
-        if (LisSock < 0) {
-            ESP_LOGE(TAG, "Unable to create socket: errno %d", errno);
-            return;
-        }
-        int opt = 1;
-        setsockopt(LisSock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-        int flags = fcntl(LisSock, F_GETFL, 0);
-        fcntl(LisSock, F_SETFL, flags | O_NONBLOCK); // Configurando el socket en modo no bloqueante
-
-        ESP_LOGI(TAG, "Socket created");
-    }
-
-    int err = bind(LisSock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
-    if (err != 0) {
-        ESP_LOGE(TAG, "Socket unable to bind: errno %d", errno);
-        ESP_LOGE(TAG, "IPPROTO: %d", addr_family);
-        close(LisSock);
-    }
-    ESP_LOGI(TAG, "Socket bound, port %d", PORT);
-
-    err = listen(LisSock, 1);
-
-    if (err != 0) {
-        ESP_LOGE(TAG, "Error occurred during listen: errno %d", errno);
-        close(LisSock);
-    }
-
-    ESP_LOGI(TAG, "Socket Listening");
-
-    while (1) {
-        char addr_str[128];
-        struct sockaddr_in source_addr;
-        uint addr_len = sizeof(source_addr);
-
-        sock = accept(LisSock, (struct sockaddr *)&source_addr, &addr_len);
-
-        if (sock < 0) {
-            if (errno == EWOULDBLOCK || errno == EAGAIN) {
-                vTaskDelay(100 / portTICK_PERIOD_MS); // Ajusta el tiempo de espera según tus necesidades
-                continue;
-            } else {
-                //ESP_LOGE(TAG, "Unable to accept connection: errno %d", errno);
-                vTaskDelay(100 / portTICK_PERIOD_MS);
-            }
-        } else {
-            inet_ntoa_r(((struct sockaddr_in *)&source_addr)->sin_addr.s_addr, addr_str, sizeof(addr_str) - 1);
-            ESP_LOGI(TAG, "Socket accepted ip address: %s", addr_str);
-            xTaskCreate(handle_socket, "Connection", 4096, (void *)sock, configMAX_PRIORITIES - 5, NULL);
-            vTaskDelay(10 / portTICK_PERIOD_MS);
-        }
-    }
-}
-
-
-/*
-void servo_ledc_config(void)
-{
-    ledc_timer_config_t ledc_timer = {
-        .speed_mode       = LEDC_LOW_SPEED_MODE,
-        .timer_num        = LEDC_TIMER_0,
-        .duty_resolution  = LEDC_TIMER_13_BIT,
-        .freq_hz          = 50, // (1/20 mS) O 50 Hz
-        .clk_cfg          = LEDC_AUTO_CLK
-    };
-    ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer));
-
-    ledc_channel_config_t servo_chanel1;
-
-    servo_chanel1.channel =      SERVO1_CHANNEL;
-    servo_chanel1.gpio_num =     SERVO1_PIN;
-    servo_chanel1.speed_mode =   LEDC_LOW_SPEED_MODE;
-    servo_chanel1.timer_sel =    LEDC_TIMER_0;
-    servo_chanel1.intr_type =    LEDC_INTR_DISABLE;
-    servo_chanel1.duty =         750; //5% de duty o posicion 0 grados del servo
-    servo_chanel1.hpoint =       0;
-
-    ESP_ERROR_CHECK(ledc_channel_config(&servo_chanel1));
-
-}
-*/
-/*
-static void SetAngle(int channel, uint32_t angle)
-{
-    dutyValue = minDuty + ((maxDuty-minDuty)/(maxDeg-minDeg))*(angle-minDeg);
-    ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, channel, dutyValue));
-    ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, channel));
-}
-*/
 
 /*!
  \fn void my_post_cb(spi_slave_transaction_t *trans) 
@@ -1091,9 +1033,127 @@ static void uart_tx_task(void * p_params)
         // Wait for the next cycle
         vTaskDelayUntil(&last_control_time, control_freq_ticks);
         numbytes = cbor_encode_wheel_speeds();
-        uart_write_bytes(UART_PORT , cbor_buf_tx, numbytes);
-        //char* test_str = "AA\n";
-        //uart_write_bytes(UART_PORT, (const char*)test_str, strlen(test_str));        
+        uart_write_bytes(UART_PORT , cbor_buf_tx, numbytes);       
+    }
+}
+
+bool cbor_parse_odometry_fsm(void)
+{
+    bool b_is_invalid_data = false; 
+    int ty;
+    int idx = 0;
+    
+    cbor_parser_init(cbor_buf_rx, sizeof(cbor_buf_rx), 0, &parser, &it);
+
+    while((!cbor_value_at_end(&it)) && (!b_is_invalid_data))
+    {
+        ty = cbor_value_get_type(&it);
+        
+        switch(parser_state)
+        {
+            case PARSER_START:
+            {
+                if(ty == CborArrayType)
+                {
+                    cbor_value_enter_container(&it, &arr);
+                    idx = 0;
+                    parser_state = PARSER_IS_INSIDE_ARRAY;
+                }
+                else
+                {
+                    b_is_invalid_data = true;
+                }
+                break;
+            }
+            case PARSER_IS_INSIDE_ARRAY:
+            case PARSER_GOT_X_POS:
+            case PARSER_GOT_Y_POS:
+            {
+                if(ty == CborFloatType)
+                {
+                    cbor_value_get_float(&arr, &xi_odo[idx++]);
+                    cbor_value_advance(&arr);
+                    parser_state++;
+                    //printf("%f\n", xi_odo[idx-1]);
+                    //ESP_LOGI(TAG, "%f\n", xi_odo[idx-1]);
+                }
+                else
+                {
+                    b_is_invalid_data = true;
+                    parser_state = PARSER_START;
+                    ESP_LOGI(TAG, "Error parsing CBOR data");
+                }
+                break;
+            }
+            case PARSER_GOT_ANGLE:
+            {
+                if(ty == CborInvalidType)
+                {
+                    if(cbor_value_at_end(&arr))
+                    {
+                        cbor_value_leave_container(&it, &arr);
+                        parser_state = PARSER_START;
+                        break;
+                    }
+                }
+                b_is_invalid_data = true;
+                parser_state = PARSER_START;
+                break;
+            }
+            default:
+                b_is_invalid_data = true;
+                parser_state = PARSER_START;
+                break;
+        }
+    }
+
+    return b_is_invalid_data;
+}
+
+
+void decodeCBOR(uint8_t* buffer, size_t len) {
+    CborParser parser;
+    CborValue value;
+    cbor_parser_init(buffer, len, 0, &parser, &value); // Initialize the parser
+
+    if (!cbor_value_is_container(&value)) {
+        printf("CBOR value is not a container.\n");
+        return;
+    }
+
+    CborValue array;
+    cbor_value_enter_container(&value, &array); // Enter the array
+
+    float decoded_values[3];
+    for (size_t i = 0; i < 3; i++) {
+        if (!cbor_value_is_float(&array)) {
+            printf("CBOR value is not a float.\n");
+            return;
+        }
+        cbor_value_get_float(&array, &decoded_values[i]); // Extract the float value
+        cbor_value_advance_fixed(&array); // Move to the next value in the array
+    }
+
+    // Now you can use decoded_values array for your logic
+    odo_x = decoded_values[0];
+    odo_y = decoded_values[1];
+    odo_theta = decoded_values[2];
+}
+
+void 
+uart_rx_task(void * p_params)
+{
+    int rx_bytes;
+
+    while (1) 
+    {
+        rx_bytes = uart_read_bytes(UART_PORT, cbor_buf_rx, sizeof(cbor_buf_rx), odoread_time_ms / portTICK_PERIOD_MS);
+        
+        if (rx_bytes >= CBOR_MSG_MIN_SIZE) 
+        {
+            decodeCBOR(cbor_buf_rx,rx_bytes);
+            uart_flush(UART_PORT);
+        }
     }
 }
 
@@ -1129,11 +1189,22 @@ void app_main(void)
     //Inicializando el WIFI
     wifi_init_softap();
 
-    xTaskCreate(tcp_socket_init,"TCPSocket",4096,NULL,configMAX_PRIORITIES-2,NULL);
-    xTaskCreate(AskForPicture,"SPIRetrieve",4096,NULL,configMAX_PRIORITIES-2,NULL);
-    xTaskCreate(TCPSendRobust,"TCPSend",4096,NULL,configMAX_PRIORITIES-1,NULL);
-    xTaskCreate(updatePositionSCH,"MOVServo",1024,NULL,configMAX_PRIORITIES-1,NULL);
-    xTaskCreate(CalcConfig,"CalcPosition",1024,NULL,configMAX_PRIORITIES-4,NULL);
-    xTaskCreate(BatteryUpadte,"UpdateBateria",4096,NULL,configMAX_PRIORITIES-5,NULL);
-    xTaskCreate(uart_tx_task, "uart_tx_task", 4096, NULL, configMAX_PRIORITIES-5, NULL);
+    // xTaskCreate(tcp_socket_init,"TCPSocket",4096,NULL,configMAX_PRIORITIES-2,NULL);
+    // xTaskCreate(AskForPicture,"SPIRetrieve",4096,NULL,configMAX_PRIORITIES-2,NULL);
+    // xTaskCreate(TCPSendRobust,"TCPSend",4096,NULL,configMAX_PRIORITIES-1,NULL);
+    // xTaskCreate(updatePositionSCH,"MOVServo",1024,NULL,configMAX_PRIORITIES-1,NULL);
+    // xTaskCreate(CalcConfig,"CalcPosition",1024,NULL,configMAX_PRIORITIES-4,NULL);
+    // xTaskCreate(BatteryUpadte,"UpdateBateria",4096,NULL,configMAX_PRIORITIES-5,NULL);
+    // xTaskCreate(uart_tx_task, "uart_tx_task", 4096, NULL, configMAX_PRIORITIES-5, NULL);
+
+    // Ejemplo de asignación de tareas a núcleos específicos
+    xTaskCreatePinnedToCore(tcp_socket_init, "TCPSocket", 4096, NULL, configMAX_PRIORITIES - 2, NULL, 0); // Tarea en el núcleo 0
+    xTaskCreatePinnedToCore(AskForPicture, "SPIRetrieve", 4096, NULL, configMAX_PRIORITIES - 2, NULL, 0); // Tarea en el núcleo 0
+    //xTaskCreatePinnedToCore(TCPSendRobust, "TCPSend", 4096, NULL, configMAX_PRIORITIES - 1, NULL, 0); // Tarea en el núcleo 1
+    xTaskCreate(TCPSendRobust,"TCPSend",4096,NULL,configMAX_PRIORITIES-1,NULL);// Dejar que se coloque en el mejor nucleo (Funciona mejor)
+    xTaskCreatePinnedToCore(updatePositionSCH, "MOVServo", 1024, NULL, configMAX_PRIORITIES - 1, NULL, 1); // Tarea en el núcleo 1
+    xTaskCreatePinnedToCore(CalcConfig, "CalcPosition", 1024, NULL, configMAX_PRIORITIES - 4, NULL, 1); // Tarea en el núcleo 0
+    xTaskCreatePinnedToCore(BatteryUpadte, "UpdateBateria", 4096, NULL, configMAX_PRIORITIES - 5, NULL, 1); // Tarea en el núcleo 1
+    xTaskCreatePinnedToCore(uart_tx_task, "uart_tx_task", 4096, NULL, configMAX_PRIORITIES - 5, NULL, 0); // Tarea en el núcleo 0
+    xTaskCreatePinnedToCore(uart_rx_task, "uart_rx_task", 4096, NULL, configMAX_PRIORITIES - 5, NULL, 0); // Tarea en el núcleo 0
 }
