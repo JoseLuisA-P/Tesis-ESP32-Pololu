@@ -66,6 +66,11 @@
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 
+//Variables para pruebas y cambio de placa
+
+#define isTinyS3
+//#define testeo
+
 //Parametros para la configuracion del servidor
 #define SSID                "Pololu3Pi+"
 #define WIFIPASSWORD        "MT30062023"
@@ -167,6 +172,7 @@ float odo_theta = 0;
 #define RXD_PIN             (GPIO_NUM_8)
 
 static const unsigned int control_time_ms = 100;
+
 
 /**
  * \struct
@@ -383,15 +389,18 @@ static void TCPSendRobust(void *arg)
     {
         if(tcpavail>0)
         {
-            printf ("TCPEnviado\n");
+            #ifdef testeo
+                printf ("TCPEnviado\n");
+            #endif
             int to_write = BUFFER_SIZE;
             int written = 0;
 
             while (to_write > 0) {
                     written = send(sock, &rx_buffer, to_write, 0);
-                    //int written = send(sock, codedData, to_write, 0);
                 if (written < 0) {
-                    ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
+                    #ifdef testeo
+                        ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
+                    #endif
                     tcpavail = 0;
                 }
                 to_write -= written;
@@ -430,15 +439,19 @@ void handle_socket(void *pvParameters)
         len = recv(client_socket, rx2_buffer, sizeof(rx2_buffer)-1, 0);
 
         if (len < 0) {
-            ESP_LOGE(TAG, "Error occurred during receiving: errno %d", errno);
+            #ifdef testeo
+                ESP_LOGE(TAG, "Error occurred during receiving: errno %d", errno);
+            #endif
             break;
 
         } else if (len == 0) {
-            ESP_LOGE(TAG, "Connection closed");
+            #ifdef testeo
+                ESP_LOGE(TAG, "Connection closed");
+            #endif
             break;
 
         } else {
-            ESP_LOGI(TAG, "Received %d bytes", len);
+            
             if(rx2_buffer[0]=='A') //Solicitar la imagen actual en la camara
             {
                 SPIAsk = 1;
@@ -478,9 +491,13 @@ void handle_socket(void *pvParameters)
                 int bytes_sent = send(sock, buffer, sizeof(int), 0);
 
                 if (bytes_sent < 0) {
-                    ESP_LOGE(TAG, "Error al enviar datos");
+                    #ifdef testeo
+                        ESP_LOGE(TAG, "Error al enviar datos");
+                    #endif
                 } else {
-                    ESP_LOGI(TAG, "Enviados %d bytes", bytes_sent);
+                    #ifdef testeo
+                        ESP_LOGI(TAG, "Enviados %d bytes", bytes_sent);
+                    #endif
                 }
             }
             else if(rx2_buffer[0] == 'G')
@@ -515,9 +532,13 @@ void handle_socket(void *pvParameters)
                 int bytes_sent = send(sock, odoBuffer, sizeof(int)*3, 0);
 
                 if (bytes_sent < 0) {
-                    ESP_LOGE(TAG, "Error al enviar datos");
+                    #ifdef testeo
+                        ESP_LOGE(TAG, "Error al enviar datos");
+                    #endif
                 } else {
-                    ESP_LOGI(TAG, "Enviados %d bytes", bytes_sent);
+                    #ifdef testeo
+                        ESP_LOGI(TAG, "Enviados %d bytes", bytes_sent);
+                    #endif
                 }
 
             }
@@ -559,7 +580,9 @@ static void tcp_socket_init(void *arg)
         LisSock = socket(addr_family, SOCK_STREAM, ip_protocol);
 
         if (LisSock < 0) {
-            ESP_LOGE(TAG, "Unable to create socket: errno %d", errno);
+            #ifdef testeo
+                ESP_LOGE(TAG, "Unable to create socket: errno %d", errno);
+            #endif
             return;
         }
         int opt = 1;
@@ -575,7 +598,6 @@ static void tcp_socket_init(void *arg)
         close(LisSock);
     }
     ESP_LOGI(TAG, "Socket bound, port %d", PORT);
-    //fcntl(LisSock,F_SETFL,O_NONBLOCK); //Para ser no bloqueante
 
     err = listen(LisSock, 1);
 
@@ -600,8 +622,11 @@ static void tcp_socket_init(void *arg)
         else 
         {   
             inet_ntoa_r(((struct sockaddr_in *)&source_addr)->sin_addr.s_addr, addr_str, sizeof(addr_str) - 1);
-            ESP_LOGI(TAG, "Socket accepted ip address: %s", addr_str);
-            xTaskCreate(handle_socket,"Connection",4096,(void *)sock,configMAX_PRIORITIES-5,NULL);
+            #ifdef testeo
+                ESP_LOGI(TAG, "Socket accepted ip address: %s", addr_str);
+            #endif
+            //xTaskCreate(handle_socket,"Connection",4096,(void *)sock,configMAX_PRIORITIES,NULL);
+            xTaskCreatePinnedToCore(handle_socket, "Connection", 4096, (void *)sock, configMAX_PRIORITIES, NULL, 0); // Tarea en el núcleo 0
             vTaskDelay(10/ portTICK_PERIOD_MS);
         }
         
@@ -726,8 +751,6 @@ static void AskForPicture(void *arg)
     spi_slave.rx_buffer = rx_buffer;
 
     spi_slave_transmit(SPI2_HOST,&spi_slave,portMAX_DELAY);
-    //spi_slave_queue_trans(SPI2_HOST,&spi_slave,portMAX_DELAY);
-    //spi_slave_get_trans_result(SPI2_HOST,&spi_dummy,portMAX_DELAY);
     SPIAsk = 0;
     tcpavail = 1;
     }
@@ -906,56 +929,6 @@ static void CalcConfig(void *arg)
     }
 }
 
-/*
-uint8_t* encode_cbor(const char* data, size_t* mesSize)
-{
-    uint8_t* CBORBuffer = (uint8_t*)malloc(BUFFER_SIZE+10);
-
-    CborEncoder encoder;
-
-    cbor_encoder_init(&encoder,CBORBuffer,(BUFFER_SIZE+10),0);
-
-    cbor_encode_byte_string(&encoder, (const uint8_t*)data,(BUFFER_SIZE+10));
-
-    *mesSize = cbor_encoder_get_buffer_size(&encoder,CBORBuffer);
-
-    return CBORBuffer;
-}
-*/
-
-/*
-static bool adc_calibration_init(adc_unit_t unit, adc_channel_t channel, adc_atten_t atten, adc_cali_handle_t *out_handle)
-{
-    adc_cali_handle_t handle = NULL;
-    esp_err_t ret = ESP_FAIL;
-    bool calibrated = false;
-
-    if (!calibrated) {
-        ESP_LOGI(TAG, "calibration scheme version is %s", "Curve Fitting");
-        adc_cali_curve_fitting_config_t cali_config = {
-            .unit_id = unit,
-            .atten = atten,
-            .bitwidth = ADC_BITWIDTH_DEFAULT,
-        };
-        ret = adc_cali_create_scheme_curve_fitting(&cali_config, &handle);
-        if (ret == ESP_OK) {
-            calibrated = true;
-        }
-    }
-
-    *out_handle = handle;
-    if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "Calibration Success");
-    } else if (ret == ESP_ERR_NOT_SUPPORTED || !calibrated) {
-        ESP_LOGW(TAG, "eFuse not burnt, skip software calibration");
-    } else {
-        ESP_LOGE(TAG, "Invalid arg or no memory");
-    }
-
-    return calibrated;
-}
-*/
-
 /*!
  \fn void ADCConfig(void)
  @brief Configura e inicializa un canal ADC.
@@ -1000,7 +973,6 @@ static void BatteryUpadte(void *arg)
     while(1)
     {
         ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, ADC_CHANNEL_4, &adc_raw[0][0]));
-        //ESP_LOGI(TAG, "ADC%d Channel[%d] Raw Data: %d", ADC_UNIT_1 + 1, ADC_CHANNEL_4, adc_raw[0][0]);
         vTaskDelay(1000/ portTICK_PERIOD_MS); 
     }
 }
@@ -1037,87 +1009,15 @@ static void uart_tx_task(void * p_params)
     }
 }
 
-bool cbor_parse_odometry_fsm(void)
-{
-    bool b_is_invalid_data = false; 
-    int ty;
-    int idx = 0;
-    
-    cbor_parser_init(cbor_buf_rx, sizeof(cbor_buf_rx), 0, &parser, &it);
-
-    while((!cbor_value_at_end(&it)) && (!b_is_invalid_data))
-    {
-        ty = cbor_value_get_type(&it);
-        
-        switch(parser_state)
-        {
-            case PARSER_START:
-            {
-                if(ty == CborArrayType)
-                {
-                    cbor_value_enter_container(&it, &arr);
-                    idx = 0;
-                    parser_state = PARSER_IS_INSIDE_ARRAY;
-                }
-                else
-                {
-                    b_is_invalid_data = true;
-                }
-                break;
-            }
-            case PARSER_IS_INSIDE_ARRAY:
-            case PARSER_GOT_X_POS:
-            case PARSER_GOT_Y_POS:
-            {
-                if(ty == CborFloatType)
-                {
-                    cbor_value_get_float(&arr, &xi_odo[idx++]);
-                    cbor_value_advance(&arr);
-                    parser_state++;
-                    //printf("%f\n", xi_odo[idx-1]);
-                    //ESP_LOGI(TAG, "%f\n", xi_odo[idx-1]);
-                }
-                else
-                {
-                    b_is_invalid_data = true;
-                    parser_state = PARSER_START;
-                    ESP_LOGI(TAG, "Error parsing CBOR data");
-                }
-                break;
-            }
-            case PARSER_GOT_ANGLE:
-            {
-                if(ty == CborInvalidType)
-                {
-                    if(cbor_value_at_end(&arr))
-                    {
-                        cbor_value_leave_container(&it, &arr);
-                        parser_state = PARSER_START;
-                        break;
-                    }
-                }
-                b_is_invalid_data = true;
-                parser_state = PARSER_START;
-                break;
-            }
-            default:
-                b_is_invalid_data = true;
-                parser_state = PARSER_START;
-                break;
-        }
-    }
-
-    return b_is_invalid_data;
-}
-
-
 void decodeCBOR(uint8_t* buffer, size_t len) {
     CborParser parser;
     CborValue value;
     cbor_parser_init(buffer, len, 0, &parser, &value); // Initialize the parser
 
     if (!cbor_value_is_container(&value)) {
-        printf("CBOR value is not a container.\n");
+        #ifdef testeo
+            printf("CBOR value is not a container.\n");
+        #endif
         return;
     }
 
@@ -1127,21 +1027,22 @@ void decodeCBOR(uint8_t* buffer, size_t len) {
     float decoded_values[3];
     for (size_t i = 0; i < 3; i++) {
         if (!cbor_value_is_float(&array)) {
-            printf("CBOR value is not a float.\n");
+            #ifdef testeo
+                printf("CBOR value is not a float.\n");
+            #endif
             return;
         }
         cbor_value_get_float(&array, &decoded_values[i]); // Extract the float value
         cbor_value_advance_fixed(&array); // Move to the next value in the array
     }
 
-    // Now you can use decoded_values array for your logic
+    //Decoded values
     odo_x = decoded_values[0];
     odo_y = decoded_values[1];
     odo_theta = decoded_values[2];
 }
 
-void 
-uart_rx_task(void * p_params)
+void uart_rx_task(void * p_params)
 {
     int rx_bytes;
 
@@ -1197,14 +1098,27 @@ void app_main(void)
     // xTaskCreate(BatteryUpadte,"UpdateBateria",4096,NULL,configMAX_PRIORITIES-5,NULL);
     // xTaskCreate(uart_tx_task, "uart_tx_task", 4096, NULL, configMAX_PRIORITIES-5, NULL);
 
-    // Ejemplo de asignación de tareas a núcleos específicos
-    xTaskCreatePinnedToCore(tcp_socket_init, "TCPSocket", 4096, NULL, configMAX_PRIORITIES - 2, NULL, 0); // Tarea en el núcleo 0
-    xTaskCreatePinnedToCore(AskForPicture, "SPIRetrieve", 4096, NULL, configMAX_PRIORITIES - 2, NULL, 0); // Tarea en el núcleo 0
-    //xTaskCreatePinnedToCore(TCPSendRobust, "TCPSend", 4096, NULL, configMAX_PRIORITIES - 1, NULL, 0); // Tarea en el núcleo 1
-    xTaskCreate(TCPSendRobust,"TCPSend",4096,NULL,configMAX_PRIORITIES-1,NULL);// Dejar que se coloque en el mejor nucleo (Funciona mejor)
+    //Nucleo principal
+    xTaskCreatePinnedToCore(uart_tx_task, "uart_tx_task", 1024*2, NULL, configMAX_PRIORITIES - 1, NULL, 0); // Tarea en el núcleo 0
+    xTaskCreatePinnedToCore(uart_rx_task, "uart_rx_task", 1024*2, NULL, configMAX_PRIORITIES - 1, NULL, 0); // Tarea en el núcleo 0
+    xTaskCreatePinnedToCore(tcp_socket_init, "TCPSocket", 4096, NULL, configMAX_PRIORITIES - 3, NULL, 0); // Tarea en el núcleo 1
+    //Nucleo secundario
+    xTaskCreatePinnedToCore(AskForPicture, "SPIRetrieve", 4096, NULL, configMAX_PRIORITIES - 1, NULL, 1); // Tarea en el núcleo 1
     xTaskCreatePinnedToCore(updatePositionSCH, "MOVServo", 1024, NULL, configMAX_PRIORITIES - 1, NULL, 1); // Tarea en el núcleo 1
-    xTaskCreatePinnedToCore(CalcConfig, "CalcPosition", 1024, NULL, configMAX_PRIORITIES - 4, NULL, 1); // Tarea en el núcleo 0
-    xTaskCreatePinnedToCore(BatteryUpadte, "UpdateBateria", 4096, NULL, configMAX_PRIORITIES - 5, NULL, 1); // Tarea en el núcleo 1
-    xTaskCreatePinnedToCore(uart_tx_task, "uart_tx_task", 4096, NULL, configMAX_PRIORITIES - 5, NULL, 0); // Tarea en el núcleo 0
-    xTaskCreatePinnedToCore(uart_rx_task, "uart_rx_task", 4096, NULL, configMAX_PRIORITIES - 5, NULL, 0); // Tarea en el núcleo 0
+    xTaskCreatePinnedToCore(CalcConfig, "CalcPosition", 1024, NULL, configMAX_PRIORITIES - 2, NULL, 1); // Tarea en el núcleo 1
+    xTaskCreatePinnedToCore(BatteryUpadte, "UpdateBateria", 1024, NULL, configMAX_PRIORITIES - 2, NULL, 1); // Tarea en el núcleo 1
+    xTaskCreatePinnedToCore(TCPSendRobust, "TCPSend", 4096, NULL, configMAX_PRIORITIES - 3, NULL, 1); // Tarea en el núcleo 1
+    //Libre
+    //xTaskCreate(TCPSendRobust,"TCPSend",4096,NULL,configMAX_PRIORITIES-1,NULL);// Dejar que se coloque en el mejor nucleo (Funciona mejor)
+
+    // Ejemplo de asignación de tareas a núcleos específicos
+    //xTaskCreatePinnedToCore(tcp_socket_init, "TCPSocket", 4096, NULL, configMAX_PRIORITIES - 2, NULL, 0); // Tarea en el núcleo 0
+    //xTaskCreatePinnedToCore(AskForPicture, "SPIRetrieve", 4096, NULL, configMAX_PRIORITIES - 2, NULL, 0); // Tarea en el núcleo 0
+    //xTaskCreatePinnedToCore(TCPSendRobust, "TCPSend", 4096, NULL, configMAX_PRIORITIES - 1, NULL, 0); // Tarea en el núcleo 1
+    //xTaskCreate(TCPSendRobust,"TCPSend",4096,NULL,configMAX_PRIORITIES-1,NULL);// Dejar que se coloque en el mejor nucleo (Funciona mejor)
+    //xTaskCreatePinnedToCore(updatePositionSCH, "MOVServo", 1024, NULL, configMAX_PRIORITIES - 1, NULL, 1); // Tarea en el núcleo 1
+    //xTaskCreatePinnedToCore(CalcConfig, "CalcPosition", 1024, NULL, configMAX_PRIORITIES - 4, NULL, 1); // Tarea en el núcleo 0
+    //xTaskCreatePinnedToCore(BatteryUpadte, "UpdateBateria", 4096, NULL, configMAX_PRIORITIES - 5, NULL, 1); // Tarea en el núcleo 1
+    //xTaskCreatePinnedToCore(uart_tx_task, "uart_tx_task", 4096, NULL, configMAX_PRIORITIES - 5, NULL, 0); // Tarea en el núcleo 0
+    //xTaskCreatePinnedToCore(uart_rx_task, "uart_rx_task", 4096, NULL, configMAX_PRIORITIES - 5, NULL, 0); // Tarea en el núcleo 0
 }
