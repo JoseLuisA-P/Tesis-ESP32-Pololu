@@ -82,6 +82,8 @@
 int sock;
 int LisSock;
 uint8_t tcpavail = 0;
+uint8_t odometry_request = 0;
+uint8_t battery_request = 0;
 
 //Parametros para configurar el timer del LEDC
 #define LEDC_TIMER              LEDC_TIMER_0
@@ -164,6 +166,7 @@ union{
 float odo_x = 0;
 float odo_y = 0;
 float odo_theta = 0;
+uint8_t odoBuffer[sizeof(float)*3];
 
 //Configuracion del UART
 #define RX_BUF_SIZE         (1024)
@@ -173,6 +176,8 @@ float odo_theta = 0;
 
 static const unsigned int control_time_ms = 100;
 
+//Estructura de control para los mensajes
+SemaphoreHandle_t xSemaphore1, xSemaphore2;
 
 /**
  * \struct
@@ -213,9 +218,13 @@ uint8_t updateCoords = 0;//Para actualizar la configuracion luego de enviar coor
 static int adc_raw[1][10]; //Valores en bruto del ADC
 adc_oneshot_unit_handle_t adc1_handle; //Handler para las interrupciones
 int batlevel = 0; //Flag para cuando se lee el nivel de bateria
+uint8_t battery_buffer[sizeof(int)]; //Buffer para enviar el valor de la bateria por TCP
 
 //Prototipos para algunas funciones
 static void AskForPicture(void *arg);
+
+//Para habilitar el debuggeo de la plataforma
+#define testeo
 
 /*!
  \fn size_t cbor_encode_wheel_speeds(void)
@@ -387,27 +396,32 @@ static void TCPSendRobust(void *arg)
 {
     while(1)
     {
+
         if(tcpavail>0)
         {
-            #ifdef testeo
-                printf ("TCPEnviado\n");
-            #endif
-            int to_write = BUFFER_SIZE;
-            int written = 0;
+            if (xSemaphore1 != NULL && xSemaphoreTake(xSemaphore1, (TickType_t)portMAX_DELAY) == pdTRUE){
+                #ifdef testeo
+                    printf ("TCPEnviado\n");
+                #endif
+                int to_write = BUFFER_SIZE;
+                int written = 0;
 
-            while (to_write > 0) {
-                    written = send(sock, &rx_buffer, to_write, 0);
-                if (written < 0) {
-                    #ifdef testeo
-                        ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
-                    #endif
-                    tcpavail = 0;
+                while (to_write > 0) {
+                        written = send(sock, &rx_buffer, to_write, 0);
+                    if (written < 0) {
+                        #ifdef testeo
+                            ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
+                        #endif
+                        tcpavail = 0;
+                    }
+                    to_write -= written;
                 }
-                to_write -= written;
+                
+                tcpavail = 0;
+                xSemaphoreGive(xSemaphore1);
             }
-            
-            tcpavail = 0;
         }
+
         vTaskDelay(10/ portTICK_PERIOD_MS);
     }
 }
@@ -454,7 +468,33 @@ void handle_socket(void *pvParameters)
             
             if(rx2_buffer[0]=='A') //Solicitar la imagen actual en la camara
             {
-                SPIAsk = 1;
+                //SPIAsk = 1;
+                if (xSemaphore2 != NULL && xSemaphoreTake(xSemaphore2, (TickType_t)portMAX_DELAY) == pdTRUE)
+                {   
+
+                    int to_write = BUFFER_SIZE;
+                    int written = 0;
+
+                    while (to_write > 0) 
+                    {
+                        written = send(sock, &rx_buffer, to_write, 0);
+                        if (written < 0) {
+                            #ifdef testeo
+                                ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
+                            #endif
+                            to_write = 0;
+                        }
+                        else {
+                            #ifdef testeo
+                                ESP_LOGI(TAG, "Enviados %d bytes", written);
+                            #endif
+                            to_write -= written;
+                        }
+                    }
+
+                    xSemaphoreGive(xSemaphore2);
+                }
+
             }
             else if(rx2_buffer[0] == 'B') //Configurar los servos
             {
@@ -470,10 +510,12 @@ void handle_socket(void *pvParameters)
             else if(rx2_buffer[0]=='C')//Encender la camara, el brazo y el pololu
             {
                 gpio_set_level(POLOLUSWITCH, 1);
+                SPIAsk = 1;
             }
             else if(rx2_buffer[0]=='D')//Apagar la camara, el brazo y el pololu
             {
                 gpio_set_level(POLOLUSWITCH, 0);
+                SPIAsk = 0;
             }
             else if(rx2_buffer[0]=='E')//Recibir las coordenadas para modificar la configuracion del brazo
             {
@@ -485,19 +527,23 @@ void handle_socket(void *pvParameters)
             {
                 //Convertir el int a un arreglo de bytes para enviarlo.
                 batlevel = adc_raw[0][0];
-                uint8_t buffer[sizeof(int)];
-                memcpy(buffer, &batlevel, sizeof(int));
+                memcpy(battery_buffer, &batlevel, sizeof(int));
 
-                int bytes_sent = send(sock, buffer, sizeof(int), 0);
+                // battery_request = 1;
+                if (xSemaphore1 != NULL && xSemaphoreTake(xSemaphore1, (TickType_t)portMAX_DELAY) == pdTRUE)
+                {
+                    int bytes_sent = send(sock, battery_buffer, sizeof(int), 0);
 
-                if (bytes_sent < 0) {
-                    #ifdef testeo
-                        ESP_LOGE(TAG, "Error al enviar datos");
-                    #endif
-                } else {
-                    #ifdef testeo
-                        ESP_LOGI(TAG, "Enviados %d bytes", bytes_sent);
-                    #endif
+                    if (bytes_sent < 0) {
+                        #ifdef testeo
+                            ESP_LOGE(TAG, "Error al enviar datos");
+                        #endif
+                    } else {
+                        #ifdef testeo
+                            ESP_LOGI(TAG, "Enviados %d bytes", bytes_sent);
+                        #endif
+                    }
+                    xSemaphoreGive(xSemaphore1);
                 }
             }
             else if(rx2_buffer[0] == 'G')
@@ -517,7 +563,6 @@ void handle_socket(void *pvParameters)
             
             else if(rx2_buffer[0] == 'H')
             {
-                uint8_t odoBuffer[sizeof(float)*3];
                 odoX.input_flotante = odo_x;
                 odoY.input_flotante = odo_y;
                 odoTheta.input_flotante = odo_theta;
@@ -529,18 +574,22 @@ void handle_socket(void *pvParameters)
                     odoBuffer[c+8] = odoTheta.bytes[c];
                 }
 
-                int bytes_sent = send(sock, odoBuffer, sizeof(int)*3, 0);
+                if (xSemaphore1 != NULL && xSemaphoreTake(xSemaphore1, (TickType_t)portMAX_DELAY) == pdTRUE)
+                {
+                    // odometry_request = 1; //Solicitar el envio de odometria
+                    int bytes_sent = send(sock, odoBuffer, sizeof(int)*3, 0);
 
-                if (bytes_sent < 0) {
-                    #ifdef testeo
-                        ESP_LOGE(TAG, "Error al enviar datos");
-                    #endif
-                } else {
-                    #ifdef testeo
-                        ESP_LOGI(TAG, "Enviados %d bytes", bytes_sent);
-                    #endif
+                    if (bytes_sent < 0) {
+                        #ifdef testeo
+                            ESP_LOGE(TAG, "Error al enviar datos");
+                        #endif
+                    } else {
+                        #ifdef testeo
+                            ESP_LOGI(TAG, "Enviados %d bytes", bytes_sent);
+                        #endif
+                    }
+                    xSemaphoreGive(xSemaphore1);
                 }
-
             }
         }
     }
@@ -740,22 +789,36 @@ void SPI_init_config(void)
 
 static void AskForPicture(void *arg)
 {   
-    while(1){
-    if(SPIAsk)
+    while(1)
     {
-    spi_slave_transaction_t spi_slave;
-    memset(rx_buffer,0x30,BUFFER_SIZE);
-    memset(&spi_slave,0,sizeof(spi_slave));
+        if (SPIAsk >0 && xSemaphore2 != NULL && xSemaphoreTake(xSemaphore2, (TickType_t)portMAX_DELAY) == pdTRUE)
+        {
+            spi_slave_transaction_t spi_slave;
+            memset(rx_buffer,0x30,BUFFER_SIZE);
+            memset(&spi_slave,0,sizeof(spi_slave));
 
-    spi_slave.length = BUFFER_SIZE*8;
-    spi_slave.rx_buffer = rx_buffer;
+            spi_slave.length = BUFFER_SIZE*8;
+            spi_slave.rx_buffer = rx_buffer;
 
-    spi_slave_transmit(SPI2_HOST,&spi_slave,portMAX_DELAY);
-    SPIAsk = 0;
-    tcpavail = 1;
-    }
+            spi_slave_transmit(SPI2_HOST,&spi_slave,portMAX_DELAY);
 
-    vTaskDelay(10/ portTICK_PERIOD_MS);
+            xSemaphoreGive(xSemaphore2);
+        }
+        // if(SPIAsk)
+        // {
+        //     spi_slave_transaction_t spi_slave;
+        //     memset(rx_buffer,0x30,BUFFER_SIZE);
+        //     memset(&spi_slave,0,sizeof(spi_slave));
+
+        //     spi_slave.length = BUFFER_SIZE*8;
+        //     spi_slave.rx_buffer = rx_buffer;
+
+        //     spi_slave_transmit(SPI2_HOST,&spi_slave,portMAX_DELAY);
+        //     SPIAsk = 0;
+        //     tcpavail = 1;
+        // }
+
+        vTaskDelay(100/ portTICK_PERIOD_MS);
     }
 }
 
@@ -954,8 +1017,8 @@ void ADCConfig(void)
     };
     ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, ADC_CHANNEL_4, &config));
 
-    //adc_cali_handle_t adc_cali_chan4_handle = NULL;
-    //bool calibration_chan4 = adc_calibration_init(ADC_UNIT_1, ADC_CHANNEL_4, ADC_ATTEN_DB_0, &adc_cali_chan4_handle);
+    // adc_cali_handle_t adc_cali_chan4_handle = NULL;
+    // bool calibration_chan4 = adc_calibration_init(ADC_UNIT_1, ADC_CHANNEL_4, ADC_ATTEN_DB_0, &adc_cali_chan4_handle);
 
 }
 
@@ -1058,8 +1121,26 @@ void uart_rx_task(void * p_params)
     }
 }
 
+void initSemaphores() {
+    
+    xSemaphore1 = xSemaphoreCreateBinary(); // Crea un semáforo binario
+    xSemaphore2 = xSemaphoreCreateBinary(); // Crea un semáforo binario
+
+    if (xSemaphore1 != NULL) 
+    {
+        xSemaphoreGive(xSemaphore1); // Inicializa el semáforo en estado "libre"
+    }
+
+    if (xSemaphore2 != NULL) 
+    {
+        xSemaphoreGive(xSemaphore2); // Inicializa el semáforo en estado "libre"
+    }
+}
+
 void app_main(void)
 {   
+    //Inicializar los semaphores de control
+    initSemaphores();
 
     //Inicializando el UART
     UART_init();
@@ -1101,13 +1182,13 @@ void app_main(void)
     //Nucleo principal
     xTaskCreatePinnedToCore(uart_tx_task, "uart_tx_task", 1024*2, NULL, configMAX_PRIORITIES - 1, NULL, 0); // Tarea en el núcleo 0
     xTaskCreatePinnedToCore(uart_rx_task, "uart_rx_task", 1024*2, NULL, configMAX_PRIORITIES - 1, NULL, 0); // Tarea en el núcleo 0
-    xTaskCreatePinnedToCore(tcp_socket_init, "TCPSocket", 4096, NULL, configMAX_PRIORITIES - 3, NULL, 0); // Tarea en el núcleo 1
+    xTaskCreatePinnedToCore(tcp_socket_init, "TCPSocket", 4096, NULL, configMAX_PRIORITIES - 2, NULL, 0); // Tarea en el núcleo 1
     //Nucleo secundario
     xTaskCreatePinnedToCore(AskForPicture, "SPIRetrieve", 4096, NULL, configMAX_PRIORITIES - 1, NULL, 1); // Tarea en el núcleo 1
     xTaskCreatePinnedToCore(updatePositionSCH, "MOVServo", 1024, NULL, configMAX_PRIORITIES - 1, NULL, 1); // Tarea en el núcleo 1
     xTaskCreatePinnedToCore(CalcConfig, "CalcPosition", 1024, NULL, configMAX_PRIORITIES - 2, NULL, 1); // Tarea en el núcleo 1
-    xTaskCreatePinnedToCore(BatteryUpadte, "UpdateBateria", 1024, NULL, configMAX_PRIORITIES - 2, NULL, 1); // Tarea en el núcleo 1
-    xTaskCreatePinnedToCore(TCPSendRobust, "TCPSend", 4096, NULL, configMAX_PRIORITIES - 3, NULL, 1); // Tarea en el núcleo 1
+    xTaskCreatePinnedToCore(BatteryUpadte, "UpdateBateria", 1024, NULL, configMAX_PRIORITIES - 1, NULL, 1); // Tarea en el núcleo 1
+    //xTaskCreatePinnedToCore(TCPSendRobust, "TCPSend", 1024*4, NULL, configMAX_PRIORITIES - 2, NULL, 1); // Tarea en el núcleo 1
     //Libre
     //xTaskCreate(TCPSendRobust,"TCPSend",4096,NULL,configMAX_PRIORITIES-1,NULL);// Dejar que se coloque en el mejor nucleo (Funciona mejor)
 
