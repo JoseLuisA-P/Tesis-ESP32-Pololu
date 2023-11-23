@@ -12,9 +12,9 @@ Que contiene este repositorio:
 - Enlaces a las pruebas y validación del agente.
 
 ### Tabla de contenido:
-- [Plataforma de trabajo](#plataforma)
-- [Estructura del repositorio](#estructura)
-- [Como ensamblar los modulos y placas](#ensamble)
+- [Plataforma de trabajo](#Plataformadetrabajo)
+- [Estructura del repositorio](#Estructuradelrepositorio)
+- [Como ensamblar los modulos y placas](#Comoensamblarlosmodulosyplacas)
 - [Resultados](#Resultados)
 
 ### Plataforma de trabajo
