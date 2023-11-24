@@ -38,7 +38,7 @@ En caso de que surjan errores durante la compilación o la importación, las adv
 ## Configuracion de la placa
 
 
-Para configurar la placa al iniciar un proyecto nuevo o importar porciones del proyecto, puedes utilizar la siguiente configuración:
+Para configurar la placa al iniciar un proyecto nuevo o importar porciones del proyecto, se puede utilizar la siguiente configuración:
 
 ![Configuraion de la placa](https://github.com/JoseLuisA-P/Tesis-ESP32-Pololu/blob/main/assets/ConfiguracionPlaca.png?raw=true)
 
