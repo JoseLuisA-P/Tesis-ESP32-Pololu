@@ -39,11 +39,11 @@ En cuanto al diseño de elementos físicos, se llevó a cabo en Autodesk Invento
 
 El repositorio se encuentra estructurado de la siguiente forma:
 - En la carpeta [**PruebasCOMS**](/PruebasCOMS), se encuentra el proyecto utilizado para configurar y crear el firmware del TinyS3.
-- En la carpeta **assets** se encuentran las imágenes utilizadas para este repositorio.
-- En la carpeta **Videos** se encuentran videos de las pruebas de ensamblaje de este trabajo.
-- En la carpeta **Manufactura** se encuentran los archivos para manufacturar las PCBs e imprimir las piezas de este trabajo.
-- En la carpeta **ControlCliente** se encuentran los scripts para el control del agente desde Python.
-- En la carpeta **Camara** se encuentra el script para el envio bajo demanda de la imagen desde la OpenMV Cam H7.
+- En la carpeta [**assets**](/assets) se encuentran las imágenes utilizadas para este repositorio.
+- En la carpeta [**Videos**](/Videos) se encuentran videos de las pruebas de ensamblaje de este trabajo.
+- En la carpeta [**Manufactura**](/Manufactura) se encuentran los archivos para manufacturar las PCBs e imprimir las piezas de este trabajo.
+- En la carpeta [**ControlCliente**](/ControlCliente) se encuentran los scripts para el control del agente desde Python.
+- En la carpeta [**Camara**](/Camara) se encuentra el script para el envio bajo demanda de la imagen desde la OpenMV Cam H7.
 
 ### Como ensamblar los modulos y placas
 
