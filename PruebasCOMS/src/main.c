@@ -117,67 +117,50 @@ uint32_t dutyValue;
 #define POLOLUSWITCH    GPIO_NUM_4
 
 //Variables para las solicitudes
-#define BUFFER_SIZE 4800 //antes 1600
-char rx_buffer[BUFFER_SIZE];
-//char recvbuf[3];
-uint8_t SPIAsk = 0;
-spi_device_interface_config_t CamH7;
-spi_device_handle_t  SPIHandle;
+#define BUFFER_SIZE 4800                // Tamaño del Buffer para la recepcion de datos
+char rx_buffer[BUFFER_SIZE];            // Buffer para los datos recibidos por SPI
+uint8_t SPIAsk = 0;                     // Bandera de control para la solicitud de datos
+spi_device_interface_config_t CamH7;    // Configuracion de la camara como dispositivo conectado por SPI
+spi_device_handle_t  SPIHandle;         // Handle para el modulo SPI configurado
 
-//TAG para el log de errores o informacion
-static const char *TAG = "Prueba";
+static const char *TAG = "Prueba"; //TAG para el log de errores o informacion
 
-//Control de los servos
-#define SERVO_MIN_PULSEWIDTH 400  // Minimum pulse width in microseconds
-#define SERVO_MAX_PULSEWIDTH 2400 // Maximum pulse width in microseconds
-#define SERVO_MAX_DEGREE 180      // Maximum angle in degrees
+#define SERVO_MIN_PULSEWIDTH 400  // Pulso minimo en microsegundos
+#define SERVO_MAX_PULSEWIDTH 2400 // Pulso maximo en microsegundos
+#define SERVO_MAX_DEGREE 180      // Angulo maximo para los manipuladores
 
-//Configuracion del CBOR 
-#define CBOR_BUF_SIZE       (32)
-#define CBOR_MSG_MIN_SIZE   (16)
+#define CBOR_BUF_SIZE       (32)    //Tamaño del mensaje de CBOR
+#define CBOR_MSG_MIN_SIZE   (16)    //Tamaño minimo del mensaje de CBOR
 
-enum parser_fsm_state
-{
-    PARSER_START = 0,
-    PARSER_IS_INSIDE_ARRAY,
-    PARSER_GOT_X_POS,
-    PARSER_GOT_Y_POS,
-    PARSER_GOT_ANGLE
-} parser_state;
-
-uint8_t sendOdo = 0; //Para enviar la odometria al cliente
-char odo_buffer[BUFFER_SIZE];
-float xi_odo[3];  // Valores de [x,y,theta] del agente
-uint8_t cbor_buf_tx[CBOR_BUF_SIZE] = {0};
-uint8_t cbor_buf_rx[CBOR_BUF_SIZE] = {0};
-static const unsigned int odoread_time_ms = 100;
-CborEncoder encoder, array_encoder;
-CborParser parser;
-CborValue it, arr;
-volatile float phi_ell = 0;//-50;  // in rpm
-volatile float phi_r = 0;//50;     // in rpm
+uint8_t sendOdo = 0;                                // Para enviar la odometria al cliente
+char odo_buffer[BUFFER_SIZE];                       // Buffer para la odometria
+float xi_odo[3];                                    // Valores de [x,y,theta] del agente
+uint8_t cbor_buf_tx[CBOR_BUF_SIZE] = {0};           // Buffer para la recepcion de datos CBOR
+uint8_t cbor_buf_rx[CBOR_BUF_SIZE] = {0};           // Buffer para el envio de datos CBOR
+static const unsigned int odoread_time_ms = 100;    // Tiempo de control para la lectura de la odometria
+CborEncoder encoder, array_encoder;                 // Variable de encoder y de encoder para un arreglo de datos en CBOR
+CborParser parser;                                  // Parser para el arreglo en CBOR
+volatile float phi_ell = 0;                         // Variable para la velocidad de la rueda izquierda
+volatile float phi_r = 0;                           // Variable para la velocidad de la rueda derecha
 
 union{
     float input_flotante;
     uint8_t bytes[4];
 } odoX, odoY, odoTheta; //Para convertir los floats en bytes y luego enviarlos al cliente
 
-//Segunda configuracion del CBOR
-float odo_x = 0;
-float odo_y = 0;
-float odo_theta = 0;
-uint8_t odoBuffer[sizeof(float)*3];
+float odo_x = 0;                        //Guarda el ultimo valor de X leido por odometria
+float odo_y = 0;                        //Guarda el ultimo valor de Y leido por odometria
+float odo_theta = 0;                    //Guarda el ultimo valor de Theta leido por odometria
+uint8_t odoBuffer[sizeof(float)*3];     //Buffer para la decodificacion de los datos
 
-//Configuracion del UART
-#define RX_BUF_SIZE         (1024)
-#define UART_PORT           UART_NUM_2
-#define TXD_PIN             (GPIO_NUM_7)
-#define RXD_PIN             (GPIO_NUM_8)
+#define RX_BUF_SIZE         (1024)          //Tamaño maximo del buffer
+#define UART_PORT           UART_NUM_2      //Modulo UART utilizado para la comunicacion
+#define TXD_PIN             (GPIO_NUM_7)    //Numero de GPIO utilizado para TX
+#define RXD_PIN             (GPIO_NUM_8)    //Numero de GPIO utilizado para RX
 
-static const unsigned int control_time_ms = 100;
+static const unsigned int control_time_ms = 100; //Tiempo de control, para la transmision de las variables de controla al agente
 
-//Estructura de control para los mensajes
-SemaphoreHandle_t xSemaphore1, xSemaphore2;
+SemaphoreHandle_t xSemaphore1, xSemaphore2; //Estructura de control para los mensajes
 
 /**
  * \struct
@@ -203,10 +186,10 @@ typedef struct {
     uint32_t duty_us3;  /**< Ciclo de trabajo en la junta 3. */
 }   ManSer;
 
-ManSer brazo = {60,60,100,0,0,0};
+ManSer brazo = {60,60,100,0,0,0}; //Inicializando los valores en la estructura
 
-uint32_t configj1,configj2,configj3;
-uint32_t step1,step2,step3;
+uint32_t configj1,configj2,configj3; //Configuracion en grados de las juntas para su control
+uint32_t step1,step2,step3; //Para realizar los pasos en los ajustes de las juntas
 
 uint32_t q1, q2; //Configuraciones calculadas
 uint32_t es1 = 47; //Largo eslabon 1
@@ -227,16 +210,16 @@ static void AskForPicture(void *arg);
 #define testeo
 
 /*!
- \fn size_t cbor_encode_wheel_speeds(void)
+ \fn size_t encodeCBOR(void)
  @brief Codifica las velocidades de la rueda en formato CBOR en un buffer.
 
  Inicializa el codificador CBOR con el buffer especificado y su tamaño, luego, se crea
- un array de CBOR con las velocidades de cada motor como un puntu flotante. Por ultimo, 
- se ciera el contenedor del array y se devuelve el tamaño del buffer para ser enviado.
+ un array de CBOR con las velocidades de cada motor como un punto flotante. Por ultimo, 
+ se cierra el contenedor del array y se devuelve el tamaño del buffer para ser enviado.
 
 */
 
-size_t cbor_encode_wheel_speeds(void)
+size_t encodeCBOR(void)
 {
     cbor_encoder_init(&encoder, cbor_buf_tx, sizeof(cbor_buf_tx), 0);
     cbor_encoder_create_array(&encoder, &array_encoder, 2);
@@ -523,7 +506,7 @@ void handle_socket(void *pvParameters)
                 coordY = rx2_buffer[2];
                 updateCoords = 1;
             }
-            else if(rx2_buffer[0]=='F')
+            else if(rx2_buffer[0]=='F')//Enviar el nivel de la bateria.
             {
                 //Convertir el int a un arreglo de bytes para enviarlo.
                 batlevel = adc_raw[0][0];
@@ -546,7 +529,7 @@ void handle_socket(void *pvParameters)
                     xSemaphoreGive(xSemaphore1);
                 }
             }
-            else if(rx2_buffer[0] == 'G')
+            else if(rx2_buffer[0] == 'G') //Actualiza las velocidades de las ruedas del agente.
             {
                 uint32_t concatR = 0;
                 uint32_t concatL = 0;
@@ -561,7 +544,7 @@ void handle_socket(void *pvParameters)
                 memcpy(&phi_r, &concatR, sizeof(float));
             }
             
-            else if(rx2_buffer[0] == 'H')
+            else if(rx2_buffer[0] == 'H') //Enviar el valor de la odometria interna.
             {
                 odoX.input_flotante = odo_x;
                 odoY.input_flotante = odo_y;
@@ -779,8 +762,7 @@ void SPI_init_config(void)
  Inicia bajo demanda la transmision de datos por el bus SPI, ante la bandera SPIAsk. En el inicio de cada
  transaccion configura el bus de recepcion y la estuctura de transaccion, para recibir el dato, luego 
  establece la longitud de la transaccion en bits e inicia la transmision. Al terminar la transaccion, se
- activa la bandera para el envio de datos por TCP, indicando que hay datos disponibles y baja la bandera de
- SPIAsk, ya que se cumplio con la solicitud de imagen.
+ copia el valor recibido al buffer de imagen.
 
  \note se utiliza spi_slave_transmit, ya que este inicia la transaccion y es capaz de determinar la cantidad
  de datos recibidos, si son necesarios. Al no configurar el buffer de TX, solo se esperan los datos.
@@ -804,19 +786,6 @@ static void AskForPicture(void *arg)
 
             xSemaphoreGive(xSemaphore2);
         }
-        // if(SPIAsk)
-        // {
-        //     spi_slave_transaction_t spi_slave;
-        //     memset(rx_buffer,0x30,BUFFER_SIZE);
-        //     memset(&spi_slave,0,sizeof(spi_slave));
-
-        //     spi_slave.length = BUFFER_SIZE*8;
-        //     spi_slave.rx_buffer = rx_buffer;
-
-        //     spi_slave_transmit(SPI2_HOST,&spi_slave,portMAX_DELAY);
-        //     SPIAsk = 0;
-        //     tcpavail = 1;
-        // }
 
         vTaskDelay(100/ portTICK_PERIOD_MS);
     }
@@ -1054,7 +1023,7 @@ static void BatteryUpadte(void *arg)
 
 */
 
-static void uart_tx_task(void * p_params)
+static void uart_tx(void * p_params)
 {
     TickType_t last_control_time;
     const TickType_t control_freq_ticks = pdMS_TO_TICKS(control_time_ms);
@@ -1067,10 +1036,22 @@ static void uart_tx_task(void * p_params)
     {
         // Wait for the next cycle
         vTaskDelayUntil(&last_control_time, control_freq_ticks);
-        numbytes = cbor_encode_wheel_speeds();
+        numbytes = encodeCBOR();
         uart_write_bytes(UART_PORT , cbor_buf_tx, numbytes);       
     }
 }
+
+/*!
+ \fn void decodeCBOR(uint8_t* buffer, size_t len)
+ @brief Decodifica datos CBOR y extrae valores flotantes.
+ 
+ Esta función toma un búfer de datos CBOR y su longitud como entrada, decodifica
+ los valores flotantes contenidos en el búfer y asigna esos valores a las variables
+ globales odo_x, odo_y y odo_theta.
+ 
+ @param[in] buffer Puntero al búfer que contiene los datos CBOR.
+ @param[in] len Longitud del búfer de datos CBOR.
+ */
 
 void decodeCBOR(uint8_t* buffer, size_t len) {
     CborParser parser;
@@ -1105,7 +1086,18 @@ void decodeCBOR(uint8_t* buffer, size_t len) {
     odo_theta = decoded_values[2];
 }
 
-void uart_rx_task(void * p_params)
+/*!
+ \fn void uart_rx(void * p_params)
+ @brief Recibe periodicamente datos a traves del UART.
+
+ De manera continua recibe mensajes en el puerto y cuando estos mensajes son mayores a un minimo establecido para
+ los contenedores de CBOR, se ingresa a un ciclo que los decodifica utilizando decodeCBOR() y limpiar el buffer
+ del bus UART.
+
+
+*/
+
+void uart_rx(void * p_params)
 {
     int rx_bytes;
 
@@ -1120,6 +1112,17 @@ void uart_rx_task(void * p_params)
         }
     }
 }
+
+/*!
+ \fn void initSemaphores()
+ @brief Inicializa las variable de control del 
+
+ Crea un Semaphore binario en las estructuras de control creadas y los coloca en estado libre, para ser utilizado
+ por la primera funcion que lo requiera.
+
+ \note Se debe de ejecutar al inicio de la configuracion de la placa, previo a calendarizar las tareas.
+
+*/
 
 void initSemaphores() {
     
@@ -1171,35 +1174,14 @@ void app_main(void)
     //Inicializando el WIFI
     wifi_init_softap();
 
-    // xTaskCreate(tcp_socket_init,"TCPSocket",4096,NULL,configMAX_PRIORITIES-2,NULL);
-    // xTaskCreate(AskForPicture,"SPIRetrieve",4096,NULL,configMAX_PRIORITIES-2,NULL);
-    // xTaskCreate(TCPSendRobust,"TCPSend",4096,NULL,configMAX_PRIORITIES-1,NULL);
-    // xTaskCreate(updatePositionSCH,"MOVServo",1024,NULL,configMAX_PRIORITIES-1,NULL);
-    // xTaskCreate(CalcConfig,"CalcPosition",1024,NULL,configMAX_PRIORITIES-4,NULL);
-    // xTaskCreate(BatteryUpadte,"UpdateBateria",4096,NULL,configMAX_PRIORITIES-5,NULL);
-    // xTaskCreate(uart_tx_task, "uart_tx_task", 4096, NULL, configMAX_PRIORITIES-5, NULL);
-
     //Nucleo principal
-    xTaskCreatePinnedToCore(uart_tx_task, "uart_tx_task", 1024*2, NULL, configMAX_PRIORITIES - 1, NULL, 0); // Tarea en el núcleo 0
-    xTaskCreatePinnedToCore(uart_rx_task, "uart_rx_task", 1024*2, NULL, configMAX_PRIORITIES - 1, NULL, 0); // Tarea en el núcleo 0
-    xTaskCreatePinnedToCore(tcp_socket_init, "TCPSocket", 4096, NULL, configMAX_PRIORITIES - 2, NULL, 0); // Tarea en el núcleo 1
+    xTaskCreatePinnedToCore(uart_tx, "uart_tx_task", 1024*2, NULL, configMAX_PRIORITIES - 1, NULL, 0); // Tarea en el núcleo 0
+    xTaskCreatePinnedToCore(uart_rx, "uart_rx_task", 1024*2, NULL, configMAX_PRIORITIES - 1, NULL, 0); // Tarea en el núcleo 0
+    xTaskCreatePinnedToCore(tcp_socket_init, "TCPSocket", 4096, NULL, configMAX_PRIORITIES - 2, NULL, 0); // Tarea en el núcleo 0
     //Nucleo secundario
     xTaskCreatePinnedToCore(AskForPicture, "SPIRetrieve", 4096, NULL, configMAX_PRIORITIES - 1, NULL, 1); // Tarea en el núcleo 1
     xTaskCreatePinnedToCore(updatePositionSCH, "MOVServo", 1024, NULL, configMAX_PRIORITIES - 1, NULL, 1); // Tarea en el núcleo 1
     xTaskCreatePinnedToCore(CalcConfig, "CalcPosition", 1024, NULL, configMAX_PRIORITIES - 2, NULL, 1); // Tarea en el núcleo 1
     xTaskCreatePinnedToCore(BatteryUpadte, "UpdateBateria", 1024, NULL, configMAX_PRIORITIES - 1, NULL, 1); // Tarea en el núcleo 1
-    //xTaskCreatePinnedToCore(TCPSendRobust, "TCPSend", 1024*4, NULL, configMAX_PRIORITIES - 2, NULL, 1); // Tarea en el núcleo 1
-    //Libre
-    //xTaskCreate(TCPSendRobust,"TCPSend",4096,NULL,configMAX_PRIORITIES-1,NULL);// Dejar que se coloque en el mejor nucleo (Funciona mejor)
 
-    // Ejemplo de asignación de tareas a núcleos específicos
-    //xTaskCreatePinnedToCore(tcp_socket_init, "TCPSocket", 4096, NULL, configMAX_PRIORITIES - 2, NULL, 0); // Tarea en el núcleo 0
-    //xTaskCreatePinnedToCore(AskForPicture, "SPIRetrieve", 4096, NULL, configMAX_PRIORITIES - 2, NULL, 0); // Tarea en el núcleo 0
-    //xTaskCreatePinnedToCore(TCPSendRobust, "TCPSend", 4096, NULL, configMAX_PRIORITIES - 1, NULL, 0); // Tarea en el núcleo 1
-    //xTaskCreate(TCPSendRobust,"TCPSend",4096,NULL,configMAX_PRIORITIES-1,NULL);// Dejar que se coloque en el mejor nucleo (Funciona mejor)
-    //xTaskCreatePinnedToCore(updatePositionSCH, "MOVServo", 1024, NULL, configMAX_PRIORITIES - 1, NULL, 1); // Tarea en el núcleo 1
-    //xTaskCreatePinnedToCore(CalcConfig, "CalcPosition", 1024, NULL, configMAX_PRIORITIES - 4, NULL, 1); // Tarea en el núcleo 0
-    //xTaskCreatePinnedToCore(BatteryUpadte, "UpdateBateria", 4096, NULL, configMAX_PRIORITIES - 5, NULL, 1); // Tarea en el núcleo 1
-    //xTaskCreatePinnedToCore(uart_tx_task, "uart_tx_task", 4096, NULL, configMAX_PRIORITIES - 5, NULL, 0); // Tarea en el núcleo 0
-    //xTaskCreatePinnedToCore(uart_rx_task, "uart_rx_task", 4096, NULL, configMAX_PRIORITIES - 5, NULL, 0); // Tarea en el núcleo 0
 }
