@@ -53,4 +53,4 @@ En el proceso de ensamblaje, se incluyen referencias a pruebas creadas para obse
 
 ### Resultados
 
-En esta carpeta se incluye un listado de enlaces a videos de YouTube sin listar, en estos se puede observar el comportamiento del agente y las diversas pruebas realizadas. Las pruebas realizadas incluyen tanto los modulos de manera individual como la integracion de los multiples modulos operando al mismo tiempo.
+En este archivo se incluye un listado de enlaces a videos de YouTube sin listar, en estos se puede observar el comportamiento del agente y las diversas pruebas realizadas. Las pruebas realizadas incluyen tanto los modulos de manera individual como la integracion de los multiples modulos operando al mismo tiempo.
